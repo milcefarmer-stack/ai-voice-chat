@@ -45,6 +45,9 @@
   let listening = true; // VAD 是否在听
   let busy = false; // 正在处理一轮（ASR/LLM/TTS）
   let interrupted = false; // 本轮被打断
+  let streamActive = false; // LLM 流式生成是否进行中
+  let pendingSpeech = null; // 打断期间的语音/输入，等当前轮思考完再处理
+  let speechMuted = false; // 打断后：后续句子只显示不播报
   let streamCompleted = false;
   let abortController = null;
   let ttsQueue = [];
@@ -98,9 +101,9 @@
 
   // ---------- VAD 事件 ----------
   function onSpeechStart() {
-    // 用户开口 → 立即打断 AI（停 TTS、中止 LLM 流）
+    // 用户开口 → 只停语音播报（AI 思考/生成继续，语音输入不受影响）
     turnId++; // 让尚未完成的旧轮次 ASR 结果作废
-    interruptAll();
+    stopSpeakingOnly();
     busy = true;
     setStatus('🎤 正在听…');
   }
@@ -124,7 +127,7 @@
           busy = false;
           return;
         }
-        askAI(text);
+        requestTurn(text);
       })
       .catch((err) => {
         if (myTurn !== turnId) return;
@@ -144,8 +147,10 @@
   }
 
   // ---------- 打断 ----------
+  // 完整打断：停播报 + 中止 LLM 流（打字输入/清空/暂停聆听时用）
   function interruptAll() {
     interrupted = true;
+    speechMuted = true;
     pendingShort = '';
     if (abortController) {
       try {
@@ -153,6 +158,14 @@
       } catch { /* 忽略 */ }
       abortController = null;
     }
+    stopSpeakingOnly();
+  }
+
+  // 只停语音播报：不中止 LLM 流（思考继续），后续句子只显示不播报
+  function stopSpeakingOnly() {
+    interrupted = true;
+    speechMuted = true;
+    pendingShort = '';
     if (ttsAbort) {
       try {
         ttsAbort.abort();
@@ -175,12 +188,24 @@
   }
 
   // ---------- 与 AI 对话（流式） ----------
+  // 入口：若上一轮还在流式生成，先排队（不打断思考），生成完自动接着处理
+  function requestTurn(text) {
+    if (streamActive) {
+      pendingSpeech = text;
+      setStatus('⏳ 上一轮还在思考，稍等马上处理…');
+      return;
+    }
+    askAI(text);
+  }
+
   async function askAI(text) {
     addMessage('user', text);
     setStatus('💭 思考中…');
     busy = true;
     interrupted = false;
+    speechMuted = false; // 新一轮恢复播报
     streamCompleted = false;
+    streamActive = true;
 
     const bubble = addMessage('assistant', '');
     let full = '';
@@ -220,8 +245,8 @@
             streamCompleted = true;
             if (sentenceBuf.trim()) queueChunk(sentenceBuf.trim());
             sentenceBuf = '';
-            // 收尾：把还没凑够长度的短句也合成了
-            if (pendingShort.trim()) {
+            // 收尾：把还没凑够长度的短句也合成了（打断静音期间不播）
+            if (!speechMuted && pendingShort.trim()) {
               enqueueTTS(pendingShort);
               pendingShort = '';
             }
@@ -252,7 +277,15 @@
     }
     if (abortController === ctrl) abortController = null;
     busy = false;
+    streamActive = false;
     setStatus(ttsQueue.length || ttsPlaying ? '🔊 正在回答…' : '🟢 聆听中…');
+
+    // 排队中的新输入：上一轮思考完成后自动接着处理
+    if (pendingSpeech) {
+      const next = pendingSpeech;
+      pendingSpeech = null;
+      askAI(next);
+    }
   }
 
   // 按标点切句；句子太长时按逗号兜底切
@@ -299,7 +332,9 @@
   }
 
   // 短句攒着：清洗后不足 4 个字的先累积，凑够再合成（避免 TTS 对太短输入乱说）
+  // 打断静音期间（speechMuted）跳过：思考照常，只是不再播报
   function queueChunk(s) {
+    if (speechMuted) return;
     pendingShort += s;
     if (cleanForTTS(pendingShort).length >= 4) {
       enqueueTTS(pendingShort);
@@ -474,8 +509,8 @@
     const text = textInput.value.trim();
     if (!text) return;
     textInput.value = '';
-    interruptAll(); // 手动输入同样先打断 AI
-    askAI(text);
+    interruptAll(); // 手动输入：完整打断（停播报 + 中止当前流）
+    requestTurn(text);
   }
 
   // ---------- 清空 ----------
