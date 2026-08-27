@@ -2,5 +2,6 @@ node_modules/
 .npm-cache/
 .env
 *.log
+开发日志.txt
 # VAD/onnxruntime 资源由 npm install 自动生成（scripts/setup-vendor.mjs）
 public/vendor/
