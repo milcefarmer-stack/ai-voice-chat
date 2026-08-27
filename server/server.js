@@ -49,9 +49,9 @@ const asrAvailable = Boolean(ASR_API_KEY);
 // ---------- TTS（语音合成）配置 ----------
 const TTS_API_KEY = (process.env.TTS_API_KEY || LLM_API_KEY).trim();
 const TTS_BASE_URL = (process.env.TTS_BASE_URL || LLM_BASE_URL || 'https://api.siliconflow.cn/v1').replace(/\/+$/, '');
-// MOSS-TTSD：中英双语对话语音模型，自带音色（自然中文语音）
-const TTS_MODEL = process.env.TTS_MODEL || 'fnlp/MOSS-TTSD-v0.5';
-const TTS_VOICE = process.env.TTS_VOICE || 'fnlp/MOSS-TTSD-v0.5:alex';
+// CosyVoice2：专业 TTS，短句也正常；MOSS-TTSD 是对话模型，短句会乱说，不推荐
+const TTS_MODEL = process.env.TTS_MODEL || 'FunAudioLLM/CosyVoice2-0.5B';
+const TTS_VOICE = process.env.TTS_VOICE || 'FunAudioLLM/CosyVoice2-0.5B:bella';
 const TTS_TIMEOUT_MS = Number(process.env.TTS_TIMEOUT_MS) > 0 ? Number(process.env.TTS_TIMEOUT_MS) : 30000;
 const ttsAvailable = Boolean(TTS_API_KEY);
 

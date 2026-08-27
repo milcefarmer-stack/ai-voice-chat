@@ -39,6 +39,7 @@
   let ttsQueue = [];
   let ttsPlaying = false;
   let currentAudio = null;
+  let pendingShort = ''; // 太短的句子先攒着，凑够长度再合成，避免 TTS 对短句乱说
   let turnId = 0; // 语音轮次号：新语音开始会自增，旧语音的 ASR 结果作废
 
   // ---------- 语音识别（上传硅基流动） ----------
@@ -131,6 +132,7 @@
   // ---------- 打断 ----------
   function interruptAll() {
     interrupted = true;
+    pendingShort = '';
     if (abortController) {
       try {
         abortController.abort();
@@ -192,9 +194,12 @@
           if (j.error) throw new Error(j.error);
           if (j.done) {
             streamCompleted = true;
-            if (sentenceBuf.trim()) {
-              enqueueTTS(sentenceBuf.trim());
-              sentenceBuf = '';
+            if (sentenceBuf.trim()) queueChunk(sentenceBuf.trim());
+            sentenceBuf = '';
+            // 收尾：把还没凑够长度的短句也合成了
+            if (pendingShort.trim()) {
+              enqueueTTS(pendingShort);
+              pendingShort = '';
             }
             continue;
           }
@@ -205,7 +210,7 @@
             sentenceBuf += j.content;
             const { sentences, rest } = splitSentences(sentenceBuf);
             sentenceBuf = rest;
-            for (const s of sentences) enqueueTTS(s);
+            for (const s of sentences) queueChunk(s);
           }
         }
       }
@@ -267,6 +272,15 @@
       .replace(/\s+/g, ' ')
       .replace(/\s+([，。！？；：、,.!?;:])/g, '$1') // 中文标点前不留空格
       .trim();
+  }
+
+  // 短句攒着：清洗后不足 4 个字的先累积，凑够再合成（避免 TTS 对太短输入乱说）
+  function queueChunk(s) {
+    pendingShort += s;
+    if (cleanForTTS(pendingShort).length >= 4) {
+      enqueueTTS(pendingShort);
+      pendingShort = '';
+    }
   }
 
   async function enqueueTTS(text) {

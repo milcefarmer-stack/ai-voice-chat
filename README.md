@@ -23,7 +23,7 @@
 | **可打断** | 你开口的瞬间，AI 立即停止说话并中止 LLM 流，开始听你的新指令 |
 | **流式回答** | LLM 走 SSE 流式输出，文字逐字显示 |
 | **边说边答** | 回答按句子切分，第一句出来就开始合成语音，不用等全文 |
-| **自然语音** | 硅基流动 MOSS-TTSD（中英双语对话语音模型），替代浏览器"机器人音" |
+| **自然语音** | 硅基流动 CosyVoice2（专业 TTS，短句也正常，音色自然），替代浏览器"机器人音" |
 | **无 CDN 依赖** | VAD 的 ONNX 模型 + onnxruntime WASM 全部本地化到 `public/vendor/` |
 
 ## 快速开始
@@ -48,8 +48,8 @@ LLM_MODEL=deepseek-ai/DeepSeek-V3        # ⚠️ 必须用非 thinking 模型�
 
 ASR_MODEL=XingChenAGI/XingChenASR-V3.2-Ultra
 
-TTS_MODEL=fnlp/MOSS-TTSD-v0.5
-TTS_VOICE=fnlp/MOSS-TTSD-v0.5:alex
+TTS_MODEL=FunAudioLLM/CosyVoice2-0.5B
+TTS_VOICE=FunAudioLLM/CosyVoice2-0.5B:bella   # 可选 alex / bella / anna / david
 ```
 
 > ⚠️ **模型选择（速度关键）**：语音对话必须用**非 thinking** 模型。
@@ -93,8 +93,8 @@ npm start
 | `LLM_MODEL` | `qwen2.5:7b` | ⚠️ 语音场景用非 thinking 模型 |
 | `LLM_MAX_TOKENS` | `200` | 回答长度上限 |
 | `ASR_MODEL` | `XingChenAGI/XingChenASR-V3.2-Ultra` | 语音识别模型 |
-| `TTS_MODEL` | `fnlp/MOSS-TTSD-v0.5` | 语音合成模型（中英双语、自然音色） |
-| `TTS_VOICE` | `fnlp/MOSS-TTSD-v0.5:alex` | 音色 |
+| `TTS_MODEL` | `FunAudioLLM/CosyVoice2-0.5B` | 语音合成模型（专业 TTS，短句正常） |
+| `TTS_VOICE` | `FunAudioLLM/CosyVoice2-0.5B:bella` | 音色（可选 alex / bella / anna / david） |
 | `PORT` | `3000` | 服务端口 |
 
 ## 常见问题
@@ -111,7 +111,7 @@ npm start
 确认浏览器允许了麦克风权限；检查顶部"聆听中"指示灯是否亮着（绿点闪烁）。若被暂停，点「▶ 开始聆听」。
 
 **Q: 换 TTS 音色？**
-硅基流动 MOSS-TTSD 支持多个音色，把 `TTS_VOICE` 换成 `fnlp/MOSS-TTSD-v0.5:xxx` 试试（当前已验证 `:alex`）。
+把 `TTS_VOICE` 换成 `FunAudioLLM/CosyVoice2-0.5B:{alex|bella|anna|david}` 之一即可（当前默认 bella）。换模型（如 MOSS-TTSD）时注意：MOSS 是对话模型，对短句（如"好的"）会合成出乱码，不推荐用于流式对话。
 
 **Q: 想要完全离线（不联网）？**
 LLM 换 Ollama（本地模型），ASR/TTS 可换本地模型（如 sherpa-onnx 的 SenseVoice + Kokoro/Piper），但中文自然语音的本地方案（CosyVoice/fish-speech）需要显卡与更多配置，属于进阶改造。
