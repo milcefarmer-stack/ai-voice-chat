@@ -1,4 +1,4 @@
-# ============================================================
+﻿# ============================================================
 #  ai-voice-chat 一键安装脚本（Windows / PowerShell）
 #  用法：右键"使用 PowerShell 运行"，或：
 #    powershell -ExecutionPolicy Bypass -File .\install.ps1
