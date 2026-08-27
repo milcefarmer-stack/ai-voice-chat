@@ -26,7 +26,18 @@
   const textInput = document.getElementById('text-input');
   const statusEl = document.getElementById('status');
   const langSelect = document.getElementById('lang-select');
+  const speedSelect = document.getElementById('speed-select');
   const sttWarning = document.getElementById('stt-warning');
+
+  // 语速：记住用户选择
+  const savedSpeed = localStorage.getItem('tts-speed');
+  if (savedSpeed) speedSelect.value = savedSpeed;
+  speedSelect.addEventListener('change', () => {
+    localStorage.setItem('tts-speed', speedSelect.value);
+  });
+  function currentSpeed() {
+    return Number(speedSelect.value) || 1.0;
+  }
 
   // ---------- 状态 ----------
   const history = []; // {role:'user'|'assistant', content}
@@ -38,7 +49,10 @@
   let abortController = null;
   let ttsQueue = [];
   let ttsPlaying = false;
-  let currentAudio = null;
+  let ttsAbort = null; // TTS 请求的中止控制器
+  let audioCtx = null; // Web Audio 上下文（PCM 流式播放）
+  let ttsSources = new Set(); // 正在播放的 AudioBufferSource
+  let ttsNextStart = 0; // 下一个 PCM 块的计划播放时间
   let pendingShort = ''; // 太短的句子先攒着，凑够长度再合成，避免 TTS 对短句乱说
   let turnId = 0; // 语音轮次号：新语音开始会自增，旧语音的 ASR 结果作废
 
@@ -139,15 +153,25 @@
       } catch { /* 忽略 */ }
       abortController = null;
     }
-    ttsQueue.length = 0;
-    if (currentAudio) {
+    if (ttsAbort) {
       try {
-        currentAudio.pause();
-        currentAudio.src = '';
+        ttsAbort.abort();
       } catch { /* 忽略 */ }
-      currentAudio = null;
+      ttsAbort = null;
     }
-    ttsPlaying = false;
+    stopAllTTS();
+    ttsQueue.length = 0;
+  }
+
+  // 停止所有正在播放的 PCM 块
+  function stopAllTTS() {
+    for (const s of ttsSources) {
+      try {
+        s.stop();
+      } catch { /* 忽略 */ }
+    }
+    ttsSources.clear();
+    ttsNextStart = 0;
   }
 
   // ---------- 与 AI 对话（流式） ----------
@@ -290,44 +314,125 @@
     pumpTTS();
   }
 
+  // ---------- PCM 流式播放（Web Audio 边收边播） ----------
+  function ensureAudioCtx() {
+    if (!audioCtx) {
+      const Ctx = window.AudioContext || window.webkitAudioContext;
+      audioCtx = new Ctx();
+    }
+    return audioCtx;
+  }
+
+  // 把一个 16bit 单声道 PCM 字节块解码并排入播放计划
+  function schedulePcm(ctx, bytes, rate) {
+    const n = Math.floor(bytes.length / 2);
+    if (n < 1) return;
+    const buf = ctx.createBuffer(1, n, rate);
+    const ch = buf.getChannelData(0);
+    // 用 DataView 正确解码 16 位有符号小端整数（避免手写位运算的符号扩展 bug）
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    for (let i = 0; i < n; i++) {
+      ch[i] = view.getInt16(i * 2, true) / 32768; // -1.0 ~ 1.0
+    }
+    const src = ctx.createBufferSource();
+    src.buffer = buf;
+    src.connect(ctx.destination);
+    const startAt = Math.max(ctx.currentTime + 0.02, ttsNextStart);
+    src.start(startAt);
+    ttsNextStart = startAt + buf.duration;
+    ttsSources.add(src);
+    src.onended = () => ttsSources.delete(src);
+  }
+
+  // 等待当前句子的 PCM 播完（被打断则立即返回）
+  function waitTTSPlaybackEnd(ctrl) {
+    return new Promise((resolve) => {
+      const check = () => {
+        if (interrupted || ttsAbort !== ctrl) return resolve();
+        if (ttsSources.size === 0 && audioCtx && ttsNextStart <= audioCtx.currentTime + 0.08) return resolve();
+        setTimeout(check, 80);
+      };
+      check();
+    });
+  }
+
   async function pumpTTS() {
     if (ttsPlaying || interrupted || ttsQueue.length === 0) return;
     ttsPlaying = true;
     const text = ttsQueue.shift();
     setStatus('🔊 正在回答…（开口可打断）');
+    const ctrl = new AbortController();
+    ttsAbort = ctrl;
+
     try {
       const resp = await fetch('/api/tts', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text }),
+        body: JSON.stringify({ text, stream: true, speed: currentSpeed() }),
+        signal: ctrl.signal,
       });
       if (!resp.ok) {
         const d = await resp.json().catch(() => ({}));
         throw new Error(d.error || 'TTS 失败');
       }
-      const blob = await resp.blob();
-      const url = URL.createObjectURL(blob);
-      currentAudio = new Audio(url);
-      await new Promise((resolve) => {
-        currentAudio.onended = resolve;
-        currentAudio.onerror = resolve;
-        currentAudio.play().catch(() => {
-          // 浏览器自动播放拦截：提示点击页面任意位置启用
-          setStatus('🔊 点击页面任意位置以允许语音播放');
+
+      const rate = Number(resp.headers.get('X-PCM-Sample-Rate')) || 24000;
+      const ctx = ensureAudioCtx();
+
+      // 浏览器自动播放策略：首次需要用户手势，等待点击解锁
+      if (ctx.state === 'suspended') {
+        setStatus('🔊 点击页面任意位置以允许语音播放');
+        await new Promise((resolve) => {
           const unlock = () => {
             document.removeEventListener('pointerdown', unlock, true);
-            currentAudio?.play().catch(() => {});
+            ctx.resume().then(() => resolve());
           };
           document.addEventListener('pointerdown', unlock, true);
-          setTimeout(resolve, 5000);
+          setTimeout(() => {
+            document.removeEventListener('pointerdown', unlock, true);
+            resolve();
+          }, 8000);
         });
-      });
-      URL.revokeObjectURL(url);
-      currentAudio = null;
+      }
+
+      const reader = resp.body.getReader();
+      let acc = new Uint8Array(0);
+      const chunkBytes = Math.floor((rate * 2 * 50) / 1000); // 每 50ms 一块
+      const prerollBytes = Math.floor((rate * 2 * 120) / 1000); // 预缓冲 120ms，防网络抖动断续
+      let started = false;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (interrupted || ttsAbort !== ctrl) {
+          try { reader.cancel(); } catch { /* 忽略 */ }
+          break;
+        }
+        const merged = new Uint8Array(acc.length + value.length);
+        merged.set(acc);
+        merged.set(value, acc.length);
+        acc = merged;
+        if (!started && acc.length >= prerollBytes) {
+          started = true;
+          ttsNextStart = ctx.currentTime + 0.05; // 留 50ms 调度余量
+        }
+        if (started) {
+          while (acc.length >= chunkBytes) {
+            schedulePcm(ctx, acc.slice(0, chunkBytes), rate);
+            acc = acc.slice(chunkBytes);
+          }
+        }
+      }
+      if (acc.length >= 2 && !interrupted && ttsAbort === ctrl) {
+        if (!started) ttsNextStart = ctx.currentTime + 0.05;
+        schedulePcm(ctx, acc, rate); // 尾部不足一块也播
+      }
+      await waitTTSPlaybackEnd(ctrl);
     } catch (err) {
-      console.error('TTS 出错：', err);
+      if (err.name !== 'AbortError') console.error('TTS 出错：', err);
     } finally {
       ttsPlaying = false;
+      if (ttsAbort === ctrl) ttsAbort = null;
       if (interrupted) {
         setStatus('🎤 正在听…');
       } else if (ttsQueue.length) {
@@ -432,6 +537,10 @@
         onSpeechStart,
         onSpeechEnd,
         onError: onVadError,
+        // ---- 低延迟调优 ----
+        redemptionMs: 500, // 说完静音 0.5s 即判定结束（默认 1400ms，省近 1 秒）
+        preSpeechPadMs: 400, // 语音前补白（默认 800ms）
+        minSpeechMs: 300, // 最短语音段（默认 400ms）
       });
       listening = true;
       listenIndicator.hidden = false;

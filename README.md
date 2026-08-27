@@ -24,6 +24,7 @@
 | **流式回答** | LLM 走 SSE 流式输出，文字逐字显示 |
 | **边说边答** | 回答按句子切分，第一句出来就开始合成语音，不用等全文 |
 | **自然语音** | 硅基流动 CosyVoice2（专业 TTS，短句也正常，音色自然），替代浏览器"机器人音" |
+| **低延迟** | TTS 走**流式 PCM**（首块音频约 0.2~0.6s，非流式 mp3 要 2.4s）+ VAD 说完 0.5s 即判结束 + LLM SSE 流式 |
 | **无 CDN 依赖** | VAD 的 ONNX 模型 + onnxruntime WASM 全部本地化到 `public/vendor/` |
 
 ## 快速开始
@@ -95,14 +96,19 @@ npm start
 | `ASR_MODEL` | `XingChenAGI/XingChenASR-V3.2-Ultra` | 语音识别模型 |
 | `TTS_MODEL` | `FunAudioLLM/CosyVoice2-0.5B` | 语音合成模型（专业 TTS，短句正常） |
 | `TTS_VOICE` | `FunAudioLLM/CosyVoice2-0.5B:bella` | 音色（可选 alex / bella / anna / david） |
+| `TTS_SPEED` | `1.0` | 默认语速（0.25~4.0）；页面上的语速选择器可随时覆盖 |
 | `PORT` | `3000` | 服务端口 |
 
 ## 常见问题
 
 **Q: AI 回答慢？**
-1. 确认用的是非 thinking 模型（见上文模型选择）；
-2. 本方案已做流式 + 句级 TTS，第一句语音通常在 1~2 秒内开始；
-3. `LLM_MAX_TOKENS` 默认 200，足够短回答。
+本项目已做全套低延迟优化：
+1. **非 thinking 模型**（DeepSeek-V3 无思维链，首 token 快）；
+2. **LLM SSE 流式** + **句级切分**，第一句完成立即合成；
+3. **TTS 流式 PCM**（`stream:true` + Web Audio 边收边播）——首块音频约 **0.2~0.6 秒**（非流式 mp3 实测 2.4 秒）；
+4. **VAD 快速端点**——说完静音 0.5s 即判定结束（默认 1.4s，省近 1 秒）。
+
+实测一轮"说完话 → 听到回答"的语音首字延迟通常在 1~2 秒内（ASR 0.3~0.8s + LLM 首 token 0.3~0.8s + TTS 首块 0.2~0.6s，多段流水线重叠）。
 
 **Q: 识别出错（network / service-not-allowed）？**
 那是浏览器自带识别（Chrome 走 Google，国内不可用）。本项目默认走**录音上传识别**（硅基流动 XingChenASR），国内稳定。若仍报错，确认 `.env` 里 `LLM_API_KEY` 已配置。
@@ -112,6 +118,9 @@ npm start
 
 **Q: 换 TTS 音色？**
 把 `TTS_VOICE` 换成 `FunAudioLLM/CosyVoice2-0.5B:{alex|bella|anna|david}` 之一即可（当前默认 bella）。换模型（如 MOSS-TTSD）时注意：MOSS 是对话模型，对短句（如"好的"）会合成出乱码，不推荐用于流式对话。
+
+**Q: 怎么调语速？**
+页面上「语速」下拉框直接调（0.6 慢 ~ 1.5 快），即时生效并记住选择；也可以改 `.env` 的 `TTS_SPEED`（0.25~4.0）设默认值。语速通过重新合成实现，无音调失真。
 
 **Q: 想要完全离线（不联网）？**
 LLM 换 Ollama（本地模型），ASR/TTS 可换本地模型（如 sherpa-onnx 的 SenseVoice + Kokoro/Piper），但中文自然语音的本地方案（CosyVoice/fish-speech）需要显卡与更多配置，属于进阶改造。

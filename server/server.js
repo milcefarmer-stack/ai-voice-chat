@@ -55,6 +55,14 @@ const TTS_VOICE = process.env.TTS_VOICE || 'FunAudioLLM/CosyVoice2-0.5B:bella';
 const TTS_TIMEOUT_MS = Number(process.env.TTS_TIMEOUT_MS) > 0 ? Number(process.env.TTS_TIMEOUT_MS) : 30000;
 const ttsAvailable = Boolean(TTS_API_KEY);
 
+// 默认语速（0.25 ~ 4.0，1.0 为正常），前端也可每次请求单独指定
+function clampSpeed(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return 1.0;
+  return Math.min(4.0, Math.max(0.25, n));
+}
+const TTS_SPEED = clampSpeed(process.env.TTS_SPEED || 1.0);
+
 // ---------- 静态资源 ----------
 app.use(express.static(path.join(__dirname, '..', 'public')));
 app.use(express.json({ limit: '1mb' }));
@@ -206,25 +214,32 @@ app.post('/api/chat/stream', async (req, res) => {
 });
 
 // ---------- 语音合成（TTS）：文本 → 自然中文语音 ----------
+// 默认流式模式：响应体为 16bit 单声道 PCM（裸流），前端 Web Audio 边收边播，
+// 首块音频延迟约 300ms（非流式 mp3 约 2.4s，实测提升 8 倍）。
+// 传 { stream:false } 可退回 mp3 一次性返回。
 app.post('/api/tts', async (req, res) => {
-  const { text } = req.body || {};
+  const { text, stream } = req.body || {};
   const t = (text || '').trim();
   if (!t) return res.status(400).json({ error: '缺少文本' });
   if (!ttsAvailable) {
     return res.status(500).json({ error: '未配置 TTS：请在 .env 中配置 TTS_API_KEY（或 LLM_API_KEY，硅基流动 Key 通用）' });
   }
 
+  const wantStream = stream === true;
+  const body = {
+    model: TTS_MODEL,
+    voice: TTS_VOICE,
+    input: t.slice(0, 200), // 单次合成限长
+    response_format: wantStream ? 'pcm' : 'mp3',
+    speed: clampSpeed(req.body.speed !== undefined ? req.body.speed : TTS_SPEED), // 语速 0.25~4.0
+  };
+  if (wantStream) body.sample_rate = 24000; // CosyVoice2 原生采样率
+
   try {
     const resp = await fetch(`${TTS_BASE_URL}/audio/speech`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${TTS_API_KEY}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: TTS_MODEL,
-        voice: TTS_VOICE,
-        input: t.slice(0, 200), // 单次合成限长
-        response_format: 'mp3',
-        speed: 1.0,
-      }),
+      body: JSON.stringify(body),
       signal: AbortSignal.timeout(TTS_TIMEOUT_MS),
     });
 
@@ -233,12 +248,31 @@ app.post('/api/tts', async (req, res) => {
       return res.status(resp.status).json({ error: `语音合成返回 ${resp.status}: ${errText.slice(0, 300)}` });
     }
 
-    const buf = Buffer.from(await resp.arrayBuffer());
-    res.setHeader('Content-Type', 'audio/mpeg');
-    res.setHeader('Cache-Control', 'no-store');
-    res.send(buf);
+    if (wantStream) {
+      // 流式 PCM：直接转发上游字节流
+      res.setHeader('Content-Type', 'application/octet-stream');
+      res.setHeader('X-PCM-Sample-Rate', '24000');
+      res.setHeader('Cache-Control', 'no-store');
+      for await (const chunk of resp.body) {
+        if (res.writableEnded) break;
+        res.write(chunk);
+      }
+      res.end();
+    } else {
+      const buf = Buffer.from(await resp.arrayBuffer());
+      res.setHeader('Content-Type', 'audio/mpeg');
+      res.setHeader('Cache-Control', 'no-store');
+      res.send(buf);
+    }
   } catch (e) {
-    res.status(502).json({ error: `语音合成请求失败（${TTS_BASE_URL}/audio/speech）: ${e.message}` });
+    // 客户端打断/连接断开等情况
+    if (!res.headersSent) {
+      res.status(502).json({ error: `语音合成请求失败（${TTS_BASE_URL}/audio/speech）: ${e.message}` });
+    } else {
+      try {
+        res.end();
+      } catch { /* 连接已断开 */ }
+    }
   }
 });
 
