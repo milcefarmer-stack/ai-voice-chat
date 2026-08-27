@@ -6,7 +6,9 @@
   "type": "module",
   "main": "server/server.js",
   "scripts": {
-    "start": "node server/server.js",
+    "start": "powershell -ExecutionPolicy Bypass -File scripts/start.ps1",
+    "stop": "powershell -ExecutionPolicy Bypass -File scripts/stop.ps1",
+    "restart": "powershell -ExecutionPolicy Bypass -File scripts/restart.ps1",
     "dev": "node --watch server/server.js",
     "postinstall": "node scripts/setup-vendor.mjs"
   },

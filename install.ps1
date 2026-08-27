@@ -67,15 +67,7 @@ foreach ($t in $targets) {
 
 # ---------- 6. 启动验证 ----------
 Write-Host "`n[5/5] 启动验证…"
-$p = Start-Process -FilePath "node" -ArgumentList "server/server.js" -WorkingDirectory $RepoDir -WindowStyle Hidden -PassThru
-Start-Sleep -Seconds 4
-try {
-  $cfg = Invoke-RestMethod -Uri "http://localhost:3000/api/config" -TimeoutSec 5
-  Write-Host "✅ 服务已启动: http://localhost:3000"
-  Write-Host "   LLM: $($cfg.model) / TTS: $($cfg.ttsVoice)"
-} catch {
-  Write-Host "⚠️ 服务启动未确认，请手动运行：cd $RepoDir && npm start" -ForegroundColor Yellow
-}
+& (Join-Path $RepoDir "scripts\start.ps1")
 
 Write-Host "`n==============================================" -ForegroundColor Green
 Write-Host "  安装完成！" -ForegroundColor Green

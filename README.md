@@ -67,13 +67,16 @@ TTS_VOICE=FunAudioLLM/CosyVoice2-0.5B:bella   # 可选 alex / bella / anna / dav
 
 其他 LLM 源：本地 Ollama（`LLM_API_KEY` 留空，自动连 `http://localhost:11434`）、DeepSeek 官方、OpenAI 等 OpenAI 兼容服务均可，改 `LLM_BASE_URL` / `LLM_MODEL` 即可。
 
-### 3. 启动
+### 3. 启动 / 停止（服务管理）
 
 ```bash
-npm start
+npm start       # 启动（后台运行，若端口被占自动先杀旧实例，可反复复用）
+npm run stop    # 停止（按 .server.pid + 端口双保险杀进程，不留孤儿）
+npm run restart # 重启
+npm run dev     # 前台调试模式（带日志输出，Ctrl+C 退出）
 ```
 
-看到 `✅ AI 语音对话已启动: http://localhost:3000` 即可。
+看到 `✅ 服务已启动: http://localhost:3000` 即可。进程 PID 记录在 `.server.pid`（已 gitignore）。
 
 ### 4. 使用
 
