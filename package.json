@@ -1,0 +1,18 @@
+{
+  "name": "ai-voice-chat",
+  "version": "1.0.0",
+  "private": true,
+  "description": "本地运行的 AI 实时语音对话：浏览器录音识别(STT) + LLM + 浏览器语音合成(TTS)",
+  "type": "module",
+  "main": "server/server.js",
+  "scripts": {
+    "start": "node server/server.js",
+    "dev": "node --watch server/server.js"
+  },
+  "dependencies": {
+    "@ricky0123/vad-web": "^0.0.30",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.2",
+    "multer": "^2.0.1"
+  }
+}
