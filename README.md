@@ -10,7 +10,7 @@
    ▼
 本地后端 /api/chat/stream ──► 硅基流动 LLM（流式 SSE，逐字返回）
    ▼
-句级切分 → /api/tts ──► 硅基流动 MOSS-TTSD 自然中文语音播放
+句级切分 → /api/tts ──► 硅基流动 CosyVoice2 自然中文语音播放
    │
    └─ 你随时开口 → 立即打断 AI（停语音 + 中止流式请求）
 ```
@@ -28,6 +28,14 @@
 | **无 CDN 依赖** | VAD 的 ONNX 模型 + onnxruntime WASM 全部本地化到 `public/vendor/` |
 
 ## 快速开始
+
+### 0. 一键安装（Windows 推荐）
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+自动完成：环境检查 → `npm install`（含 VAD 资源生成）→ 生成 `.env` → 安装 Python 录音依赖 → 把 `voice-chat` skill 装进 Claude Code / agent → 启动服务。
 
 ### 1. 安装依赖
 
@@ -98,6 +106,28 @@ npm start
 | `TTS_VOICE` | `FunAudioLLM/CosyVoice2-0.5B:bella` | 音色（可选 alex / bella / anna / david） |
 | `TTS_SPEED` | `1.0` | 默认语速（0.25~4.0）；页面上的语速选择器可随时覆盖 |
 | `PORT` | `3000` | 服务端口 |
+
+## 给 Claude Code / agent 用（voice-chat skill）
+
+本仓库自带 `skill/voice-chat`——一个让 agent 具备**发声 + 收音**能力的 skill（安装脚本会自动装进 `~/.claude/skills` 和 `~/.agents/skills`）。
+
+在 Claude Code 里直接说：
+
+- **"把这段话读出来"** → agent 运行 `speak.ps1`，用 CosyVoice2 自然中文音色朗读
+- **"用语音问我一个问题，等我说完再继续"** → `speak.ps1` 提问 → `listen.py` 录音识别 → 拿到你的口头回答继续干活
+- **"语音回复我"** → 完成工作后播报结果
+
+skill 结构：
+
+```
+skill/voice-chat/
+├── SKILL.md              # 触发说明 + 使用指引
+├── scripts/
+│   ├── speak.ps1         # 文本 → TTS → 播放（支持 -Text / -TextFile / 管道）
+│   ├── listen.py         # 录音 → ASR → 输出文字（按回车结束）
+│   └── status.ps1        # 检查/启动服务（读 appdir.txt 定位应用）
+└── references/api.md     # 后端 API 文档
+```
 
 ## 常见问题
 

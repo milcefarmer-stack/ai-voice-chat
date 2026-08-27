@@ -226,11 +226,13 @@ app.post('/api/tts', async (req, res) => {
   }
 
   const wantStream = stream === true;
+  // 输出格式：默认流式 pcm；非流式可用 format 指定 wav / mp3（speak 脚本用 wav 直接播放）
+  const fmt = ['mp3', 'wav', 'pcm'].includes(req.body.format) ? req.body.format : wantStream ? 'pcm' : 'mp3';
   const body = {
     model: TTS_MODEL,
     voice: TTS_VOICE,
     input: t.slice(0, 200), // 单次合成限长
-    response_format: wantStream ? 'pcm' : 'mp3',
+    response_format: fmt,
     speed: clampSpeed(req.body.speed !== undefined ? req.body.speed : TTS_SPEED), // 语速 0.25~4.0
   };
   if (wantStream) body.sample_rate = 24000; // CosyVoice2 原生采样率
@@ -260,7 +262,7 @@ app.post('/api/tts', async (req, res) => {
       res.end();
     } else {
       const buf = Buffer.from(await resp.arrayBuffer());
-      res.setHeader('Content-Type', 'audio/mpeg');
+      res.setHeader('Content-Type', fmt === 'wav' ? 'audio/wav' : 'audio/mpeg');
       res.setHeader('Cache-Control', 'no-store');
       res.send(buf);
     }
