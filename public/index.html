@@ -24,10 +24,14 @@
   <!-- 对话记录 -->
   <div id="chat-log" class="card chat-log"></div>
 
+  <!-- 历史对话列表 -->
+  <div id="history-panel" class="card history-panel" hidden></div>
+
   <!-- 控制区 -->
   <div class="card controls">
     <div class="row">
       <button id="listen-btn" class="primary big">⏸ 暂停聆听</button>
+      <button id="history-btn">📚 历史</button>
       <button id="clear-btn">清空对话</button>
     </div>
 
@@ -63,7 +67,7 @@
 
   <footer>
     <p id="stt-warning" hidden>⚠️ VAD 初始化失败：请检查浏览器麦克风权限，或改用文字输入。</p>
-    <p>语音识别：录音上传（硅基流动 XingChenASR）· 语音合成：硅基流动 MOSS-TTSD · VAD：Silero（浏览器本地运行）</p>
+    <p>语音识别：本地 sherpa-onnx（SenseVoice，离线）· 语音合成：本地 sherpa-onnx（vits-melo，离线）· VAD：Silero（浏览器本地运行）</p>
   </footer>
 
   <script src="/vendor/ort/ort.min.js"></script>

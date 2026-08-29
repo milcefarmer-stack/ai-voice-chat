@@ -17,6 +17,7 @@
     "dotenv": "^16.4.5",
     "express": "^4.21.2",
     "multer": "^2.0.1",
-    "onnxruntime-web": "^1.29.0"
+    "onnxruntime-web": "^1.29.0",
+    "sherpa-onnx-node": "^1.13.6"
   }
 }

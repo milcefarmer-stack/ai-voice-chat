@@ -5,15 +5,17 @@
  *   1. 提供静态页面（public/）
  *   2. POST /api/chat        —— 完整回答（非流式）
  *   3. POST /api/chat/stream —— 流式回答（SSE，逐字下发，可随时断开实现打断）
- *   4. POST /api/asr         —— 接收录音，转发硅基流动 ASR，返回文字
- *   5. POST /api/tts         —— 文本转语音（硅基流动 MOSS-TTSD，自然中文音色），返回 mp3
+ *   4. POST /api/asr         —— 接收录音并识别（默认本地 sherpa-onnx SenseVoice，可回退云端）
+ *   5. POST /api/tts         —— 文本转语音（默认本地 sherpa-onnx vits-melo 流式 PCM，可回退云端）
  *   6. GET  /api/config      —— 返回 LLM / ASR / TTS 配置状态
  *
  * LLM 支持三种来源，通过 .env 切换：
  *   - 本地 Ollama（LLM_API_KEY 留空，自动连 http://localhost:11434）
  *   - DeepSeek / OpenAI / 硅基流动 / 其他任意 OpenAI 兼容服务
  *
- * ASR / TTS 默认复用 LLM_API_KEY（硅基流动），模型可用 .env 更换。
+ * ASR / TTS 默认本地离线（sherpa-onnx，无网络延迟、免 Key、免限额）；
+ *   - ASR_PROVIDER=TTS_PROVIDER=auto：本地就绪则用本地，否则/失败时回退云端
+ *   - 配置为 cloud 则完全走云端（硅基流动，复用 LLM_API_KEY）
  * 注意：语音对话请使用【非 thinking】模型（如 deepseek-ai/DeepSeek-V3），
  *       thinking 模型（R1 / Qwen3 默认）回答前会输出思维链，响应很慢。
  */
@@ -22,6 +24,8 @@ import express from 'express';
 import multer from 'multer';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { initSherpa, warmup, sherpaStatus, transcribeWav, synthesizeStream, synthesizeWav } from './sherpa.js';
+import { listHistory, getHistory, saveHistory, deleteHistory } from './history.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -46,6 +50,9 @@ const ASR_MODEL = process.env.ASR_MODEL || 'XingChenAGI/XingChenASR-V3.2-Ultra';
 const ASR_TIMEOUT_MS = Number(process.env.ASR_TIMEOUT_MS) > 0 ? Number(process.env.ASR_TIMEOUT_MS) : 60000;
 const asrAvailable = Boolean(ASR_API_KEY);
 
+// ASR 提供方：auto（默认，本地就绪则本地，否则/失败回退云端）/ local / cloud
+const ASR_PROVIDER = (process.env.ASR_PROVIDER || 'auto').toLowerCase();
+
 // ---------- TTS（语音合成）配置 ----------
 const TTS_API_KEY = (process.env.TTS_API_KEY || LLM_API_KEY).trim();
 const TTS_BASE_URL = (process.env.TTS_BASE_URL || LLM_BASE_URL || 'https://api.siliconflow.cn/v1').replace(/\/+$/, '');
@@ -54,6 +61,9 @@ const TTS_MODEL = process.env.TTS_MODEL || 'FunAudioLLM/CosyVoice2-0.5B';
 const TTS_VOICE = process.env.TTS_VOICE || 'FunAudioLLM/CosyVoice2-0.5B:bella';
 const TTS_TIMEOUT_MS = Number(process.env.TTS_TIMEOUT_MS) > 0 ? Number(process.env.TTS_TIMEOUT_MS) : 30000;
 const ttsAvailable = Boolean(TTS_API_KEY);
+
+// TTS 提供方：auto（默认）/ local / cloud，语义同 ASR_PROVIDER
+const TTS_PROVIDER = (process.env.TTS_PROVIDER || 'auto').toLowerCase();
 
 // 默认语速（0.25 ~ 4.0，1.0 为正常），前端也可每次请求单独指定
 function clampSpeed(v) {
@@ -75,14 +85,28 @@ const upload = multer({
 
 // ---------- 当前配置状态 ----------
 app.get('/api/config', (_req, res) => {
+  const st = sherpaStatus();
+  // 实际生效的提供方（auto 模式下取决于本地引擎是否就绪）
+  const asrEffective = ASR_PROVIDER === 'cloud' || !st.asrReady
+    ? (asrAvailable ? 'siliconflow' : 'browser')
+    : 'local-sherpa';
+  const ttsEffective = TTS_PROVIDER === 'cloud' || !st.ttsReady
+    ? (ttsAvailable ? 'siliconflow' : 'none')
+    : 'local-sherpa';
   res.json({
     baseUrl: LLM_BASE_URL,
     model: LLM_MODEL,
     hasKey: Boolean(LLM_API_KEY),
     useOllama: !LLM_API_KEY,
-    asrProvider: asrAvailable ? 'siliconflow' : 'browser',
+    asrProvider: asrEffective,
     asrModel: ASR_MODEL,
-    ttsAvailable,
+    asrLocalReady: st.asrReady,
+    asrLocalError: st.asrError,
+    ttsAvailable: ttsEffective !== 'none',
+    ttsProvider: ttsEffective,
+    ttsLocalReady: st.ttsReady,
+    ttsLocalError: st.ttsError,
+    ttsSampleRate: st.ttsSampleRate || null,
     ttsModel: TTS_MODEL,
     ttsVoice: TTS_VOICE,
   });
@@ -221,19 +245,62 @@ app.post('/api/tts', async (req, res) => {
   const { text, stream } = req.body || {};
   const t = (text || '').trim();
   if (!t) return res.status(400).json({ error: '缺少文本' });
-  if (!ttsAvailable) {
-    return res.status(500).json({ error: '未配置 TTS：请在 .env 中配置 TTS_API_KEY（或 LLM_API_KEY，硅基流动 Key 通用）' });
-  }
 
   const wantStream = stream === true;
   // 输出格式：默认流式 pcm；非流式可用 format 指定 wav / mp3（speak 脚本用 wav 直接播放）
   const fmt = ['mp3', 'wav', 'pcm'].includes(req.body.format) ? req.body.format : wantStream ? 'pcm' : 'mp3';
+  const speed = clampSpeed(req.body.speed !== undefined ? req.body.speed : TTS_SPEED); // 语速 0.25~4.0
+
+  // ---------- 本地 sherpa-onnx 合成（首选，完全离线） ----------
+  const st = sherpaStatus();
+  if (TTS_PROVIDER !== 'cloud' && st.ttsReady) {
+    try {
+      if (wantStream || fmt === 'pcm') {
+        // 流式 PCM：边合成边下发，首块音频延迟 ~0.2s
+        res.setHeader('Content-Type', 'application/octet-stream');
+        res.setHeader('X-PCM-Sample-Rate', String(st.ttsSampleRate || 44100));
+        res.setHeader('Cache-Control', 'no-store');
+        res.flushHeaders?.();
+        let clientGone = false;
+        res.on('close', () => { clientGone = true; });
+        await synthesizeStream(t, {
+          speed,
+          shouldStop: () => clientGone || res.writableEnded, // 打断 → 原生层立即停止生成
+          onChunk: (buf) => {
+            if (!clientGone && !res.writableEnded) res.write(buf);
+          },
+        });
+        return res.end();
+      }
+      // 非流式 wav（本地引擎无 mp3 编码器，mp3 请求也返回 wav 容器）
+      const { buffer } = await synthesizeWav(t, { speed });
+      res.setHeader('Content-Type', 'audio/wav');
+      res.setHeader('Cache-Control', 'no-store');
+      return res.send(buffer);
+    } catch (e) {
+      if (res.headersSent) {
+        // 中途失败/客户端已断开，无法再回退云端
+        try { res.end(); } catch { /* 忽略 */ }
+        return;
+      }
+      console.error('[tts] 本地合成失败，回退云端：', e.message);
+      // 落到下方云端逻辑
+    }
+  }
+
+  // ---------- 云端合成（回退 / 配置为 cloud 时） ----------
+  if (!ttsAvailable) {
+    return res.status(500).json({
+      error: '本地 TTS 未就绪且未配置云端：请检查 models/tts 模型目录，或在 .env 配置 TTS_API_KEY（或 LLM_API_KEY，硅基流动 Key 通用）',
+    });
+  }
+
   const body = {
     model: TTS_MODEL,
     voice: TTS_VOICE,
     input: t.slice(0, 200), // 单次合成限长
     response_format: fmt,
-    speed: clampSpeed(req.body.speed !== undefined ? req.body.speed : TTS_SPEED), // 语速 0.25~4.0
+    speed,
   };
   if (wantStream) body.sample_rate = 24000; // CosyVoice2 原生采样率
 
@@ -278,15 +345,37 @@ app.post('/api/tts', async (req, res) => {
   }
 });
 
-// ---------- 语音识别（ASR）：接收录音并转发给硅基流动 ----------
+// ---------- 语音识别（ASR）：本地 sherpa-onnx 优先，失败回退云端 ----------
 app.post('/api/asr', (req, res) => {
   upload.single('file')(req, res, async (err) => {
     if (err) return res.status(400).json({ error: `上传失败: ${err.message}` });
-    if (!asrAvailable) {
-      return res.status(500).json({ error: '未配置语音识别：请在 .env 中配置 ASR_API_KEY（或 LLM_API_KEY，硅基流动 Key 通用）' });
-    }
     if (!req.file) return res.status(400).json({ error: '缺少音频文件（字段名应为 file）' });
 
+    const st = sherpaStatus();
+    const canLocal = ASR_PROVIDER !== 'cloud' && st.asrReady;
+    if (!canLocal && !asrAvailable) {
+      return res.status(500).json({
+        error: '本地 ASR 未就绪且未配置云端：请检查 models/asr 模型目录，或在 .env 配置 ASR_API_KEY（或 LLM_API_KEY，硅基流动 Key 通用）',
+      });
+    }
+
+    // ---- 本地识别（完全离线，无上传/网络延迟） ----
+    if (canLocal) {
+      try {
+        const t0 = Date.now();
+        const text = await transcribeWav(req.file.buffer);
+        console.log(`[asr] 本地识别 ${Date.now() - t0}ms："${text.slice(0, 50)}"`);
+        return res.json({ text });
+      } catch (e) {
+        if (!asrAvailable) {
+          return res.status(502).json({ error: `本地识别失败：${e.message}` });
+        }
+        console.error('[asr] 本地识别失败，回退云端：', e.message);
+        // 落到下方云端逻辑
+      }
+    }
+
+    // ---- 云端识别（回退） ----
     try {
       const form = new FormData();
       form.append('model', ASR_MODEL);
@@ -320,11 +409,53 @@ app.post('/api/asr', (req, res) => {
   });
 });
 
+// ---------- 历史会话 ----------
+app.get('/api/history', (_req, res) => {
+  res.json({ sessions: listHistory() });
+});
+
+app.get('/api/history/:id', (req, res) => {
+  const s = getHistory(req.params.id);
+  if (!s) return res.status(404).json({ error: '会话不存在' });
+  res.json({ session: s });
+});
+
+app.post('/api/history', (req, res) => {
+  const { id, title, messages } = req.body || {};
+  if (!id) return res.status(400).json({ error: '缺少会话 id' });
+  try {
+    const session = saveHistory(id, messages, title);
+    res.json({ session });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.delete('/api/history/:id', (req, res) => {
+  deleteHistory(req.params.id);
+  res.json({ ok: true });
+});
+
 app.listen(PORT, () => {
+  const v8 = process.versions.v8 || '';
   console.log(`✅ AI 语音对话已启动: http://localhost:${PORT}`);
+  console.log(`   Node: ${process.version}（v8 ${v8}${v8.includes('electron') ? '，⚠️ Electron 运行时，本地 sherpa 引擎不可用' : ''}）`);
   console.log(`   LLM: ${LLM_BASE_URL} / ${LLM_MODEL}${LLM_API_KEY ? '（已配置 Key）' : '（未配置 Key → 尝试本地 Ollama）'}`);
-  console.log(
-    `   ASR: ${asrAvailable ? `${ASR_BASE_URL} / ${ASR_MODEL}` : '未配置，回退到浏览器语音识别（Chrome/Edge）'}`
-  );
-  console.log(`   TTS: ${ttsAvailable ? `${TTS_BASE_URL} / ${TTS_MODEL} / ${TTS_VOICE}` : '未配置（使用浏览器语音合成）'}`);
+  console.log(`   ASR: ${ASR_PROVIDER === 'cloud' ? `云端 ${ASR_BASE_URL} / ${ASR_MODEL}` : '本地 sherpa-onnx（优先）→ 云端回退'}`);
+  console.log(`   TTS: ${TTS_PROVIDER === 'cloud' ? `云端 ${TTS_MODEL} / ${TTS_VOICE}` : '本地 sherpa-onnx（优先）→ 云端回退'}`);
+
+  // 后台初始化 + 预热本地语音引擎（不阻塞 HTTP 服务）
+  (async () => {
+    const st = sherpaStatus();
+    if (!st.loaded && ASR_PROVIDER !== 'cloud' && TTS_PROVIDER !== 'cloud') {
+      console.log(`   ⚠️ sherpa-onnx 未加载：${st.loadError}`);
+    }
+    await initSherpa();
+    await warmup();
+    const s2 = sherpaStatus();
+    console.log(
+      `   语音引擎：ASR ${s2.asrReady ? '✅ 本地就绪' : s2.asrError ? `❌ ${s2.asrError}` : '☁️ 走云端'} · ` +
+      `TTS ${s2.ttsReady ? `✅ 本地就绪（${s2.ttsSampleRate}Hz）` : s2.ttsError ? `❌ ${s2.ttsError}` : '☁️ 走云端'}`
+    );
+  })();
 });

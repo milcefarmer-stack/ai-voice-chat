@@ -31,17 +31,34 @@ if ($existing.Count -gt 0) {
   Start-Sleep -Milliseconds 800
 }
 
-# ---------- 2. 启动新实例（隐藏窗口，写 PID 文件） ----------
+# ---------- 2. 选择可用的 Node（排除 Electron 内置运行时） ----------
+# Electron 内置 Node（V8 版本号带 electron 字样）会拒绝原生 external buffer，
+# 导致 sherpa-onnx 本地语音引擎不可用；优先选真正的 node.exe
+function Get-RealNodeExe {
+  try { $candidates = @(where.exe node 2>$null) | Where-Object { $_ } } catch { $candidates = @() }
+  foreach ($n in $candidates) {
+    try {
+      $v = & $n -p 'process.versions.v8' 2>$null
+      if ($v -and ($v -notmatch 'electron')) { return $n }
+    } catch { }
+  }
+  return 'node'
+}
+$nodeExe = Get-RealNodeExe
+
+# ---------- 3. 启动新实例（隐藏窗口，写 PID 文件） ----------
 if (Test-Path $pidFile) { Remove-Item $pidFile -Force }
-$proc = Start-Process -FilePath 'node' -ArgumentList 'server/server.js' -WorkingDirectory $AppDir -WindowStyle Hidden -PassThru
+$proc = Start-Process -FilePath $nodeExe -ArgumentList 'server/server.js' -WorkingDirectory $AppDir -WindowStyle Hidden -PassThru
 [System.IO.File]::WriteAllText($pidFile, [string]$proc.Id, (New-Object System.Text.UTF8Encoding($false)))
 
-# ---------- 3. 验证 ----------
-Start-Sleep -Seconds 3
+# ---------- 4. 验证 ----------
+Start-Sleep -Seconds 4
 try {
-  $cfg = Invoke-RestMethod -Uri "http://localhost:$Port/api/config" -TimeoutSec 5
-  Write-Host "✅ 服务已启动: http://localhost:$Port （PID $($proc.Id)，日志见 .server.pid）"
-  Write-Host "   LLM: $($cfg.model) / TTS: $($cfg.ttsVoice)"
+  $cfg = Invoke-RestMethod -Uri "http://localhost:$Port/api/config" -TimeoutSec 10
+  Write-Host "✅ 服务已启动: http://localhost:$Port （PID $($proc.Id)，Node: $nodeExe）"
+  Write-Host "   LLM: $($cfg.model) / 识别: $($cfg.asrProvider) / 合成: $($cfg.ttsProvider)"
+  if ($cfg.asrProvider -eq 'local-sherpa' -and -not $cfg.asrLocalReady) { Write-Host '   本地 ASR 模型加载中，几秒后就绪…' }
+  if ($cfg.ttsProvider -eq 'local-sherpa' -and -not $cfg.ttsLocalReady) { Write-Host '   本地 TTS 模型加载中，几秒后就绪…' }
   Write-Host "   停止: npm run stop"
 } catch {
   Write-Host "⚠️ 启动后未响应，请用前台模式看日志：npm run dev"

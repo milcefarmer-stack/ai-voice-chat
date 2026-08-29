@@ -6,3 +6,8 @@ node_modules/
 .server.pid
 # VAD/onnxruntime 资源由 npm install 自动生成（scripts/setup-vendor.mjs）
 public/vendor/
+# 本地语音大模型（sherpa-onnx ASR/TTS，~400MB，不进 git）
+models/
+.cowork-temp/
+# 历史会话数据（data/history.json）
+data/

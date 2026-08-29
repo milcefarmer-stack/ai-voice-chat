@@ -28,6 +28,19 @@
   const langSelect = document.getElementById('lang-select');
   const speedSelect = document.getElementById('speed-select');
   const sttWarning = document.getElementById('stt-warning');
+  const historyBtn = document.getElementById('history-btn');
+  const historyPanel = document.getElementById('history-panel');
+  const historyListEl = document.createElement('div');
+  historyListEl.className = 'history-list';
+  historyPanel.appendChild(historyListEl);
+
+  // 历史会话状态
+  function newSessionId() {
+    try { return crypto.randomUUID(); } catch { return 's' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8); }
+  }
+  let sessionId = localStorage.getItem('sessionId') || newSessionId();
+  localStorage.setItem('sessionId', sessionId);
+  let persistTimer = null;
 
   // 语速：记住用户选择
   const savedSpeed = localStorage.getItem('tts-speed');
@@ -48,6 +61,7 @@
   let streamActive = false; // LLM 流式生成是否进行中
   let pendingSpeech = null; // 打断期间的语音/输入，等当前轮思考完再处理
   let speechMuted = false; // 打断后：后续句子只显示不播报
+  let speechCandidate = false; // VAD 初步判到声音（未确认），用于"确认后才打断"（避免自打断）
   let streamCompleted = false;
   let abortController = null;
   let ttsQueue = [];
@@ -58,6 +72,148 @@
   let ttsNextStart = 0; // 下一个 PCM 块的计划播放时间
   let pendingShort = ''; // 太短的句子先攒着，凑够长度再合成，避免 TTS 对短句乱说
   let turnId = 0; // 语音轮次号：新语音开始会自增，旧语音的 ASR 结果作废
+
+  // ---------- 历史会话：持久化 ----------
+  // 消息变更后延迟合并保存，避免每 token 都写盘；只保存 user/assistant
+  function persistSession() {
+    if (persistTimer) clearTimeout(persistTimer);
+    persistTimer = setTimeout(async () => {
+      try {
+        await fetch('/api/history', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: sessionId, messages: history }),
+        });
+      } catch (e) {
+        console.warn('保存历史失败：', e.message);
+      }
+    }, 400);
+  }
+
+  function fmtTime(ts) {
+    const d = new Date(ts);
+    const p = (n) => String(n).padStart(2, '0');
+    return `${d.getMonth() + 1}/${d.getDate()} ${p(d.getHours())}:${p(d.getMinutes())}`;
+  }
+
+  function renderMessages(msgs) {
+    chatLog.innerHTML = '';
+    for (const m of msgs) {
+      const div = document.createElement('div');
+      div.className = `msg ${m.role}`;
+      div.textContent = m.content;
+      chatLog.appendChild(div);
+    }
+    chatLog.scrollTop = chatLog.scrollHeight;
+  }
+
+  async function refreshHistoryList() {
+    if (historyPanel.hidden) return;
+    try {
+      const r = await fetch('/api/history');
+      const d = await r.json();
+      const list = d.sessions || [];
+      historyListEl.innerHTML = '';
+      if (!list.length) {
+        const e = document.createElement('div');
+        e.className = 'history-empty';
+        e.textContent = '暂无历史对话';
+        historyListEl.appendChild(e);
+        return;
+      }
+      for (const s of list) {
+        const item = document.createElement('div');
+        item.className = 'history-item'; if (s.id === sessionId) item.classList.add('current');
+        const info = document.createElement('div');
+        info.className = 'history-item-info';
+        const title = document.createElement('div');
+        title.className = 'history-item-title';
+        title.textContent = s.title;
+        const meta = document.createElement('div');
+        meta.className = 'history-item-meta';
+        meta.textContent = `${fmtTime(s.updatedAt)} · ${s.count} 条`;
+        info.appendChild(title); info.appendChild(meta);
+        const btns = document.createElement('div');
+        btns.className = 'history-item-btns';
+        const load = document.createElement('button');
+        load.textContent = '加载'; load.dataset.load = s.id;
+        const del = document.createElement('button');
+        del.textContent = '删除'; del.className = 'danger'; del.dataset.del = s.id;
+        btns.appendChild(load); btns.appendChild(del);
+        item.appendChild(info); item.appendChild(btns);
+        historyListEl.appendChild(item);
+      }
+    } catch (e) {
+      console.warn('读取历史失败：', e.message);
+      historyListEl.innerHTML = '<div class="history-empty">历史读取失败</div>';
+    }
+  }
+
+  historyBtn.addEventListener('click', () => {
+    historyPanel.hidden = !historyPanel.hidden;
+    if (!historyPanel.hidden) refreshHistoryList();
+  });
+
+  historyListEl.addEventListener('click', async (e) => {
+    const loadBtn = e.target.closest('[data-load]');
+    const delBtn = e.target.closest('[data-del]');
+    if (loadBtn) {
+      const id = loadBtn.dataset.load;
+      try {
+        const r = await fetch('/api/history/' + id);
+        if (!r.ok) throw new Error('会话不存在或已删除');
+        const d = await r.json();
+        sessionId = id;
+        localStorage.setItem('sessionId', sessionId);
+        history.length = 0;
+        history.push(...(d.session.messages || []));
+        renderMessages(history);
+        setStatus(`已加载历史对话（${history.length} 条）。`);
+        historyPanel.hidden = true;
+        refreshHistoryList();
+      } catch (err) {
+        setStatus('❌ 加载历史失败：' + err.message);
+      }
+    } else if (delBtn) {
+      try {
+        await fetch('/api/history/' + delBtn.dataset.del, { method: 'DELETE' });
+        refreshHistoryList();
+      } catch (err) {
+        console.warn('删除失败：', err.message);
+      }
+    }
+  });
+
+  // 开启一段全新的对话（新建会话 id）
+  function startNewConversation(silent = false) {
+    interruptAll();
+    sessionId = newSessionId();
+    localStorage.setItem('sessionId', sessionId);
+    history.length = 0;
+    renderMessages([]);
+    ttsQueue.length = 0;
+    pendingShort = '';
+    if (!silent) setStatus('已开始新对话。');
+    refreshHistoryList();
+  }
+
+  async function restoreSession() {
+    const id = localStorage.getItem('sessionId');
+    if (!id) return;
+    try {
+      const r = await fetch('/api/history/' + id);
+      if (!r.ok) return;
+      const d = await r.json();
+      history.length = 0;
+      history.push(...(d.session.messages || []));
+      if (history.length) {
+        renderMessages(history);
+        setStatus(`已恢复上次对话（${history.length} 条）。`);
+      }
+    } catch (e) {
+      console.warn('恢复会话失败：', e.message);
+    }
+  }
 
   // ---------- 语音识别（上传硅基流动） ----------
   async function transcribe(wavBlob) {
@@ -100,16 +256,33 @@
   }
 
   // ---------- VAD 事件 ----------
+  // 注意：vad-web 的 onSpeechStart 在"第一帧过阈值"就触发，此时可能只是 TTS 扬声器漏音/误触发。
+  // 借鉴 Open-LLM-VTuber：只在 onSpeechRealStart（语音连续确认有效，超过 minSpeechMs）时才真正打断，
+  // 短爆音走 onVADMisfire 丢弃，避免"自己 TTS 把自己打断"。
   function onSpeechStart() {
-    // 用户开口 → 只停语音播报（AI 思考/生成继续，语音输入不受影响）
+    // 只"武装"：记录候选 + 更新状态，不打断、不停止播报
+    speechCandidate = true;
+    if (!busy) setStatus('🎤 正在听…');
+  }
+
+  function onSpeechRealStart() {
+    // 语音确认为真实、持续的（≥minSpeechMs），此时才打断/占位
+    speechCandidate = true;
     turnId++; // 让尚未完成的旧轮次 ASR 结果作废
-    stopSpeakingOnly();
+    stopSpeakingOnly(); // 只停语音播报（AI 思考/生成继续，语音输入不受影响）
     busy = true;
     setStatus('🎤 正在听…');
   }
 
+  function onVADMisfire() {
+    // 声音太短（如 TTS 漏音爆音），判定为误触发，不打断
+    speechCandidate = false;
+    if (!busy) setStatus('🟢 聆听中…');
+  }
+
   function onSpeechEnd(audio) {
     // audio: Float32Array @16kHz，本次说话的完整音频
+    speechCandidate = false;
     const myTurn = turnId;
     if (!audio || audio.length < 1600) {
       // 太短（<0.1s），忽略
@@ -210,6 +383,7 @@
     const bubble = addMessage('assistant', '');
     let full = '';
     let sentenceBuf = '';
+    let firstSentenceDone = false; // 首句加速：第一句未切出前，允许逗号立即断句
     const ctrl = new AbortController();
     abortController = ctrl;
 
@@ -243,7 +417,10 @@
           if (j.error) throw new Error(j.error);
           if (j.done) {
             streamCompleted = true;
-            if (sentenceBuf.trim()) queueChunk(sentenceBuf.trim());
+            if (sentenceBuf.trim()) {
+              if (firstSentenceDone) queueChunk(sentenceBuf.trim());
+              else { firstSentenceDone = true; enqueueTTS(sentenceBuf.trim()); }
+            }
             sentenceBuf = '';
             // 收尾：把还没凑够长度的短句也合成了（打断静音期间不播）
             if (!speechMuted && pendingShort.trim()) {
@@ -257,9 +434,18 @@
             bubble.textContent = full;
             chatLog.scrollTop = chatLog.scrollHeight;
             sentenceBuf += j.content;
-            const { sentences, rest } = splitSentences(sentenceBuf);
+            // 首句加速（借鉴 Open-LLM-VTuber 的 faster_first_response）：
+            // 第一句遇到逗号就立即切分送 TTS，不等句末标点，首个音频更早响起
+            const { sentences, rest } = splitSentences(sentenceBuf, !firstSentenceDone);
             sentenceBuf = rest;
-            for (const s of sentences) queueChunk(s);
+            for (const s of sentences) {
+              if (firstSentenceDone) {
+                queueChunk(s);
+              } else {
+                firstSentenceDone = true;
+                enqueueTTS(s); // 首句直接入队，不走短句攒批
+              }
+            }
           }
         }
       }
@@ -274,6 +460,7 @@
     // 完整回答进历史（被打断的半截不记录）
     if (streamCompleted && full.trim()) {
       history.push({ role: 'assistant', content: full.trim() });
+      persistSession();
     }
     if (abortController === ctrl) abortController = null;
     busy = false;
@@ -288,8 +475,9 @@
     }
   }
 
-  // 按标点切句；句子太长时按逗号兜底切
-  function splitSentences(buf) {
+  // 按标点切句；句子太长时按逗号兜底切。
+  // aggressive=true 时（首句加速模式）：遇到逗号就立即断句，不等句末标点
+  function splitSentences(buf, aggressive = false) {
     const sentences = [];
     let rest = buf;
     const m = rest.match(/^[\s\S]*?[。！？；!?;…]/);
@@ -297,7 +485,18 @@
       const seg = m[0].trim();
       if (seg) sentences.push(seg);
       rest = rest.slice(m[0].length);
-    } else if (rest.length >= 40) {
+      return { sentences, rest };
+    }
+    if (aggressive) {
+      const cm = rest.match(/^[^，,]*[，,]/);
+      if (cm && cleanForTTS(cm[0]).length >= 2) {
+        const seg = cm[0].trim();
+        if (seg) sentences.push(seg);
+        rest = rest.slice(cm[0].length);
+        return { sentences, rest };
+      }
+    }
+    if (rest.length >= 40) {
       const comma = rest.search(/[，、,]/);
       if (comma > 0) {
         const seg = rest.slice(0, comma + 1).trim();
@@ -513,12 +712,9 @@
     requestTurn(text);
   }
 
-  // ---------- 清空 ----------
+  // ---------- 清空 / 新对话 ----------
   clearBtn.addEventListener('click', () => {
-    history.length = 0;
-    chatLog.innerHTML = '';
-    interruptAll();
-    setStatus('已清空对话。');
+    startNewConversation();
   });
 
   // ---------- 工具 ----------
@@ -528,7 +724,7 @@
     div.textContent = content;
     chatLog.appendChild(div);
     chatLog.scrollTop = chatLog.scrollHeight;
-    if (role === 'user') history.push({ role: 'user', content });
+    if (role === 'user') { history.push({ role: 'user', content }); persistSession(); }
     return div;
   }
 
@@ -548,15 +744,36 @@
     .then((r) => r.json())
     .then(async (cfg) => {
       configBar.hidden = false;
-      const asrInfo = cfg.asrProvider === 'siliconflow' ? `<code>${cfg.asrModel}</code>` : '浏览器识别';
-      const ttsInfo = cfg.ttsAvailable ? `<code>${cfg.ttsModel}</code> · <code>${cfg.ttsVoice}</code>` : '浏览器合成';
-      configBar.innerHTML =
-        `LLM：<code>${cfg.baseUrl}</code> / <code>${cfg.model}</code> · ` +
-        `识别：${asrInfo} · 合成：${ttsInfo}`;
-
+      renderConfig(cfg);
+      refreshHistoryList();
       await initVAD();
+      await restoreSession();
+      // 本地语音模型是后台加载的，几秒后刷新一次状态
+      if (cfg.asrProvider === 'local-sherpa' || cfg.ttsProvider === 'local-sherpa') {
+        setTimeout(async () => {
+          try { renderConfig(await (await fetch('/api/config')).json()); } catch { /* 忽略 */ }
+        }, 8000);
+      }
     })
     .catch(() => setStatus('⚠️ 无法加载配置，请确认服务已启动。'));
+
+  function renderConfig(cfg) {
+    const asrInfo =
+      cfg.asrProvider === 'local-sherpa'
+        ? `本地 sherpa-onnx · SenseVoice${cfg.asrLocalReady ? '' : '（加载中…）'}`
+        : cfg.asrProvider === 'siliconflow'
+          ? `<code>${cfg.asrModel}</code>`
+          : '浏览器识别';
+    const ttsInfo =
+      cfg.ttsProvider === 'local-sherpa'
+        ? `本地 sherpa-onnx · vits-melo${cfg.ttsLocalReady ? '' : '（加载中…）'}`
+        : cfg.ttsAvailable
+          ? `<code>${cfg.ttsModel}</code> · <code>${cfg.ttsVoice}</code>`
+          : '浏览器合成';
+    configBar.innerHTML =
+      `LLM：<code>${cfg.baseUrl}</code> / <code>${cfg.model}</code> · ` +
+      `识别：${asrInfo} · 合成：${ttsInfo}`;
+  }
 
   async function initVAD() {
     if (!window.vad || !window.vad.MicVAD) {
@@ -570,12 +787,14 @@
         baseAssetPath: '/vendor/vad/',
         onnxWASMBasePath: '/vendor/ort/',
         onSpeechStart,
+        onSpeechRealStart,
+        onVADMisfire,
         onSpeechEnd,
         onError: onVadError,
-        // ---- 低延迟调优 ----
+        // ---- 低延迟 + 防自打断调优 ----
         redemptionMs: 500, // 说完静音 0.5s 即判定结束（默认 1400ms，省近 1 秒）
         preSpeechPadMs: 400, // 语音前补白（默认 800ms）
-        minSpeechMs: 300, // 最短语音段（默认 400ms）
+        minSpeechMs: 300, // 最短语音段（vad-web 默认 400；vtuber v5 用 9 帧≈288ms，取 300 平衡防自打断与丢短句）
       });
       listening = true;
       listenIndicator.hidden = false;
