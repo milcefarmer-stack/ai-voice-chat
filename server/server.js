@@ -127,6 +127,8 @@ app.post('/api/chat', async (req, res) => {
     stream: false,
     max_tokens: LLM_MAX_TOKENS, // 限制回答长度，加快响应（thinking 模型此项包含思维链，语音场景请勿用 thinking 模型）
   };
+  // 智谱 GLM：默认带思考，语音场景关掉以降低首字延迟 + 避免思考吃掉 max_tokens
+  if (LLM_MODEL.startsWith('glm-')) payload.thinking = { type: 'disabled' };
 
   const headers = { 'Content-Type': 'application/json' };
   if (LLM_API_KEY) headers.Authorization = `Bearer ${LLM_API_KEY}`;
@@ -178,6 +180,8 @@ app.post('/api/chat/stream', async (req, res) => {
     stream: true,
     max_tokens: LLM_MAX_TOKENS,
   };
+  // 智谱 GLM：默认带思考，语音场景关掉以降低首字延迟 + 避免思考吃掉 max_tokens
+  if (LLM_MODEL.startsWith('glm-')) payload.thinking = { type: 'disabled' };
 
   const headers = { 'Content-Type': 'application/json' };
   if (LLM_API_KEY) headers.Authorization = `Bearer ${LLM_API_KEY}`;

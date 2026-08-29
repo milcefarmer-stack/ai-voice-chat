@@ -75,3 +75,5 @@ curl -F "file=@audio.wav" http://localhost:3000/api/asr
 - 语音对话请用非 thinking 模型（`deepseek-ai/DeepSeek-V3`），thinking 模型响应慢。
 - 本地引擎优先：ASR/TTS 不耗云端额度、无网络延迟；模型缺失或加载失败时自动回退云端（需 Key）。
 - 服务必须用真正的 Node 运行（Electron 内置 Node 无法加载本地引擎，`npm start` 已自动处理）。
+- 本地引擎优先：ASR/TTS 不耗云端额度、无网络延迟；模型缺失或加载失败时自动回退云端（需 Key）。
+- TTS 默认 matcha（baker 数据集，**仅限非商用**）；换回 melo 就把 `SHERPA_TTS_MODEL_TYPE` 设为 `vits`。

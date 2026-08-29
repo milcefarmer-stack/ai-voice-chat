@@ -49,9 +49,11 @@ const ASR_TOKENS_FILE = envStr('SHERPA_ASR_TOKENS', 'tokens.txt');
 const ASR_NUM_THREADS = envNum('SHERPA_ASR_NUM_THREADS', 4);
 const ASR_LANGUAGE = envStr('SHERPA_ASR_LANGUAGE', ''); // '' 自动；可 zh/en/ja/ko/yue
 
-// TTS（vits-melo zh_en）
-const TTS_DIR = resolveModelPath(envStr('SHERPA_TTS_MODEL_DIR', 'models/tts/vits-melo-zh-en'));
-const TTS_MODEL_FILE = envStr('SHERPA_TTS_MODEL_FILE', 'model.onnx');
+// TTS（默认 matcha-zh-baker；可切回 vits-melo）
+const TTS_MODEL_TYPE = envStr('SHERPA_TTS_MODEL_TYPE', 'matcha').toLowerCase(); // 'matcha' | 'vits'
+const TTS_DIR = resolveModelPath(envStr('SHERPA_TTS_MODEL_DIR', 'models/tts/matcha-zh-baker/matcha-icefall-zh-baker'));
+const TTS_MODEL_FILE = envStr('SHERPA_TTS_MODEL_FILE', 'model-steps-3.onnx'); // matcha: model-steps-3.onnx；vits: model.onnx
+const TTS_VOCODER = resolveModelPath(envStr('SHERPA_TTS_VOCODER', 'models/tts/matcha-zh-baker/vocos-22khz-univ.onnx')); // matcha 专用声码器
 const TTS_LEXICON_FILE = envStr('SHERPA_TTS_LEXICON', 'lexicon.txt');
 const TTS_TOKENS_FILE = envStr('SHERPA_TTS_TOKENS', 'tokens.txt');
 const TTS_DICT_DIR = envStr('SHERPA_TTS_DICT_DIR', 'dict'); // jieba 分词目录（中文多音字）
@@ -63,6 +65,9 @@ const TTS_MAX_SENTENCES = Number(process.env.SHERPA_TTS_MAX_SENTENCES) === -1
 const TTS_SID = Number.isFinite(Number(process.env.SHERPA_TTS_SID))
   ? Number(process.env.SHERPA_TTS_SID)
   : 0;
+// 输出增益：默认 1.0（模型原生响度）。个别模型（如 matcha）天生偏响约 10dB，
+// 若觉得"炸麦"可在 .env 设 SHERPA_TTS_GAIN=0.4 左右压到 melo 水平
+const TTS_GAIN = envNum('SHERPA_TTS_GAIN', 1.0);
 const TTS_WARMUP_TEXT = envStr('SHERPA_TTS_WARMUP_TEXT', '你好，语音服务已经就绪了。');
 
 // ---------- 引擎状态 ----------
@@ -131,20 +136,32 @@ export async function initSherpa({ log = console } = {}) {
 
   // ----- TTS -----
   try {
-    const modelFile = path.join(TTS_DIR, TTS_MODEL_FILE);
-    if (!fileExists(modelFile)) throw new Error(`模型文件不存在: ${modelFile}`);
     const tokensFile = path.join(TTS_DIR, TTS_TOKENS_FILE);
     if (!fileExists(tokensFile)) throw new Error(`tokens 文件不存在: ${tokensFile}`);
-
-    const vits = {
-      model: modelFile,
-      tokens: tokensFile,
-      dataDir: '',
-    };
     const lexiconFile = path.join(TTS_DIR, TTS_LEXICON_FILE);
-    if (TTS_LEXICON_FILE && fileExists(lexiconFile)) vits.lexicon = lexiconFile;
     const dictDir = path.join(TTS_DIR, TTS_DICT_DIR);
-    if (TTS_DICT_DIR && fs.existsSync(dictDir)) vits.dictDir = dictDir;
+
+    // 按模型类型拼装 model 配置：matcha（声学+声码器）或 vits
+    let engineLabel = '';
+    let modelInner;
+    if (TTS_MODEL_TYPE === 'matcha') {
+      const acousticFile = path.join(TTS_DIR, TTS_MODEL_FILE);
+      if (!fileExists(acousticFile)) throw new Error(`声学模型文件不存在: ${acousticFile}`);
+      if (!fileExists(TTS_VOCODER)) throw new Error(`声码器文件不存在: ${TTS_VOCODER}`);
+      const mc = { acousticModel: acousticFile, vocoder: TTS_VOCODER, tokens: tokensFile, dataDir: '' };
+      if (TTS_LEXICON_FILE && fileExists(lexiconFile)) mc.lexicon = lexiconFile;
+      if (TTS_DICT_DIR && fs.existsSync(dictDir)) mc.dictDir = dictDir;
+      modelInner = { matcha: mc };
+      engineLabel = 'matcha-zh-baker';
+    } else {
+      const modelFile = path.join(TTS_DIR, TTS_MODEL_FILE);
+      if (!fileExists(modelFile)) throw new Error(`模型文件不存在: ${modelFile}`);
+      const vc = { model: modelFile, tokens: tokensFile, dataDir: '' };
+      if (TTS_LEXICON_FILE && fileExists(lexiconFile)) vc.lexicon = lexiconFile;
+      if (TTS_DICT_DIR && fs.existsSync(dictDir)) vc.dictDir = dictDir;
+      modelInner = { vits: vc };
+      engineLabel = 'vits-melo-zh_en';
+    }
 
     const ruleFsts = TTS_RULE_FSTS
       ? TTS_RULE_FSTS.split(',').map((s) => s.trim()).filter(Boolean)
@@ -155,19 +172,14 @@ export async function initSherpa({ log = console } = {}) {
 
     const t0 = Date.now();
     state.tts = await sherpa.OfflineTts.createAsync({
-      model: {
-        vits,
-        numThreads: TTS_NUM_THREADS,
-        provider: 'cpu',
-        debug: 0,
-      },
+      model: { ...modelInner, numThreads: TTS_NUM_THREADS, provider: 'cpu', debug: 0 },
       ruleFsts,
       maxNumSentences: TTS_MAX_SENTENCES,
     });
     state.ttsReady = true;
     state.ttsSampleRate = state.tts.sampleRate;
     log.log(
-      `[sherpa] ✅ TTS 就绪：vits-melo(zh_en) @ ${path.relative(ROOT, TTS_DIR)}（init ${Date.now() - t0}ms, threads=${TTS_NUM_THREADS}, maxSentences=${TTS_MAX_SENTENCES}, sr=${state.ttsSampleRate}）`
+      `[sherpa] ✅ TTS 就绪：${engineLabel} @ ${path.relative(ROOT, TTS_DIR)}（init ${Date.now() - t0}ms, threads=${TTS_NUM_THREADS}, maxSentences=${TTS_MAX_SENTENCES}, sr=${state.ttsSampleRate}）`
     );
   } catch (e) {
     state.ttsError = e.message;
@@ -310,7 +322,8 @@ function float32ToInt16(f32) {
   const n = f32.length;
   const buf = Buffer.alloc(n * 2);
   for (let i = 0; i < n; i++) {
-    let s = f32[i];
+    // 施加输出增益，把过响模型（如 matcha）压到 melo 水平，避免"炸麦"
+    let s = f32[i] * TTS_GAIN;
     s = s < -1 ? -1 : s > 1 ? 1 : s;
     buf.writeInt16LE(Math.round(s * (s < 0 ? 32768 : 32767)), i * 2);
   }

@@ -157,7 +157,9 @@ ASR/TTS 默认走本地离线引擎（与 Open-LLM-VTuber 同款模型，存放�
 | 引擎 | 模型 | 位置 | 实测 |
 |---|---|---|---|
 | ASR | SenseVoiceSmall int8（中英日韩粤） | `models/asr/sense-voice/` | 8s 音频识别 ~0.26s |
-| TTS | vits-melo-tts-zh_en（中英女声 sid=0） | `models/tts/vits-melo-zh-en/` | 首块 ~0.2s，RTF 0.34 |
+| TTS | matcha-icefall-zh-baker（中文女声，48kHz→22.05kHz 输出） | `models/tts/matcha-zh-baker/matcha-icefall-zh-baker/` + `vocos-22khz-univ.onnx` | 首块 ~0.08s，RTF 0.077 |
+
+> 默认 TTS 为 **matcha**（最快、自然）；`SHERPA_TTS_MODEL_TYPE=matcha` 可切回 `vits`（melo）。注意 **baker 数据集仅限非商用**。
 
 - 模型来源：[sherpa-onnx asr-models](https://github.com/k2-fsa/sherpa-onnx/releases/tag/asr-models) / [tts-models](https://github.com/k2-fsa/sherpa-onnx/releases/tag/tts-models)，目录可在 `.env` 里改；
 - `ASR_PROVIDER` / `TTS_PROVIDER`：`auto`（默认，本地优先失败回退云端）/ `local` / `cloud`；

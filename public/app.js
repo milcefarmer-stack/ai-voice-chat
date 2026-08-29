@@ -561,12 +561,57 @@
   function schedulePcm(ctx, bytes, rate) {
     const n = Math.floor(bytes.length / 2);
     if (n < 1) return;
-    const buf = ctx.createBuffer(1, n, rate);
-    const ch = buf.getChannelData(0);
-    // 用 DataView 正确解码 16 位有符号小端整数（避免手写位运算的符号扩展 bug）
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-    for (let i = 0; i < n; i++) {
-      ch[i] = view.getInt16(i * 2, true) / 32768; // -1.0 ~ 1.0
+    const srcRate = rate;
+    const dstRate = ctx.sampleRate || 44100;
+    // 重采样到 AudioContext 原生采样率：避免每块跨采样率重采样在块边界产生 click（"机关枪"声）
+    const outN = Math.max(1, Math.round((n * dstRate) / srcRate));
+    const buf = ctx.createBuffer(1, outN, dstRate);
+    const ch = buf.getChannelData(0);
+    if (srcRate === dstRate) {
+      for (let i = 0; i < n; i++) ch[i] = view.getInt16(i * 2, true) / 32768;
+    } else {
+      for (let i = 0; i < outN; i++) {
+        const pos = (i * srcRate) / dstRate;
+        const i0 = Math.floor(pos);
+        const i1 = Math.min(i0 + 1, n - 1);
+        const frac = pos - i0;
+        const a = view.getInt16(i0 * 2, true) / 32768;
+        const b = view.getInt16(i1 * 2, true) / 32768;
+        ch[i] = a + (b - a) * frac;
+      }
+    }
+    const src = ctx.createBufferSource();
+    src.buffer = buf;
+    src.connect(ctx.destination);
+    const startAt = Math.max(ctx.currentTime + 0.02, ttsNextStart);
+    src.start(startAt);
+    ttsNextStart = startAt + buf.duration;
+    ttsSources.add(src);
+    src.onended = () => ttsSources.delete(src);
+  }
+
+  // 整段 PCM 一次性播放（合成单个 AudioBuffer，无块边界毛刺）
+  function playPcm(ctx, bytes, rate) {
+    const n = Math.floor(bytes.length / 2);
+    if (n < 1) return;
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const dstRate = ctx.sampleRate || 44100;
+    const outN = Math.max(1, Math.round((n * dstRate) / rate));
+    const buf = ctx.createBuffer(1, outN, dstRate);
+    const ch = buf.getChannelData(0);
+    if (rate === dstRate) {
+      for (let i = 0; i < n; i++) ch[i] = view.getInt16(i * 2, true) / 32768;
+    } else {
+      for (let i = 0; i < outN; i++) {
+        const pos = (i * rate) / dstRate;
+        const i0 = Math.floor(pos);
+        const i1 = Math.min(i0 + 1, n - 1);
+        const frac = pos - i0;
+        const a = view.getInt16(i0 * 2, true) / 32768;
+        const b = view.getInt16(i1 * 2, true) / 32768;
+        ch[i] = a + (b - a) * frac;
+      }
     }
     const src = ctx.createBufferSource();
     src.buffer = buf;
@@ -630,11 +675,10 @@
       }
 
       const reader = resp.body.getReader();
-      let acc = new Uint8Array(0);
-      const chunkBytes = Math.floor((rate * 2 * 50) / 1000); // 每 50ms 一块
-      const prerollBytes = Math.floor((rate * 2 * 120) / 1000); // 预缓冲 120ms，防网络抖动断续
-      let started = false;
-
+      const all = [];
+      let total = 0;
+      // 整段缓冲后一次性播放：把流式 PCM 合并成一个音频缓冲，
+      // 避免大量 50ms 小缓冲在浏览器里逐个重采样造成的块边界 click（即"炸麦"声）
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
@@ -642,24 +686,14 @@
           try { reader.cancel(); } catch { /* 忽略 */ }
           break;
         }
-        const merged = new Uint8Array(acc.length + value.length);
-        merged.set(acc);
-        merged.set(value, acc.length);
-        acc = merged;
-        if (!started && acc.length >= prerollBytes) {
-          started = true;
-          ttsNextStart = ctx.currentTime + 0.05; // 留 50ms 调度余量
-        }
-        if (started) {
-          while (acc.length >= chunkBytes) {
-            schedulePcm(ctx, acc.slice(0, chunkBytes), rate);
-            acc = acc.slice(chunkBytes);
-          }
-        }
+        all.push(value);
+        total += value.length;
       }
-      if (acc.length >= 2 && !interrupted && ttsAbort === ctrl) {
-        if (!started) ttsNextStart = ctx.currentTime + 0.05;
-        schedulePcm(ctx, acc, rate); // 尾部不足一块也播
+      if (total >= 2 && !interrupted && ttsAbort === ctrl) {
+        const merged = new Uint8Array(total);
+        let off = 0;
+        for (const c of all) { merged.set(c, off); off += c.length; }
+        playPcm(ctx, merged, rate);
       }
       await waitTTSPlaybackEnd(ctrl);
     } catch (err) {
