@@ -3,16 +3,14 @@
 一个完全**本地运行**的 AI 语音对话应用，体验接近真实语音助手：
 
 ```
-麦克风 ──VAD(Silero, 浏览器本地)──► 检测说话开始/结束（免点击）
-   │ 说话结束 → 16kHz 音频
+浏览器：麦克风 ──浏览器AEC──► Silero VAD（本地，免点击）──► 智能打断策略
+   │  完整话语（16kHz PCM）⇅ WebSocket(pipecat 管线)
    ▼
-本地后端 /api/asr ──► sherpa-onnx SenseVoice 本地识别成文字（离线，~0.3s）
-   ▼
-本地后端 /api/chat/stream ──► 硅基流动 LLM（流式 SSE，逐字返回）
-   ▼
-首句逗号加速 → /api/tts ──► sherpa-onnx vits-melo 本地合成（流式 PCM，首块 ~0.2s）
-   │
-   └─ 你随时开口 → 立即打断 AI（停语音 + 中止流式请求，合成同步终止）
+服务端 pipecat 管线（Python · FastAPI）：
+   传输入口 → 整句识别 sherpa SenseVoice/云端 ──► 话轮聚合 ──► LLM(GLM/DeepSeek/Ollama…)
+   ──► 逐句切分（首句逗号加速）──► 合成 sherpa matcha/云端 CosyVoice2 ──► 传输出口
+   │  流式音频 ⇅ 文本流(bot_text/user_text/bot_end)
+   └─ 你持续开口 → 打断（AI 停播报、思考继续、剩余只显示）；短插话不打断（AI 从暂停点继续）
 ```
 
 ## 核心特性

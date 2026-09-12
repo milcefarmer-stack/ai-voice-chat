@@ -11,3 +11,13 @@ models/
 .cowork-temp/
 # 历史会话数据（data/history.json）
 data/
+
+# Python (pipecat 服务)
+.venv/
+__pycache__/
+*.pyc
+.ruff_cache/
+# 前端构建产物(可随时 npm run build:web 重新生成)
+frontend/dist/
+# 服务运行日志
+logs/

@@ -9,7 +9,9 @@
     "start": "powershell -ExecutionPolicy Bypass -File scripts/start.ps1",
     "stop": "powershell -ExecutionPolicy Bypass -File scripts/stop.ps1",
     "restart": "powershell -ExecutionPolicy Bypass -File scripts/restart.ps1",
-    "dev": "node --watch server/server.js",
+    "dev": "python -m uv run python -m voice_chat.main",
+    "build:web": "node scripts/build-web.mjs",
+    "test:web": "vitest run",
     "postinstall": "node scripts/setup-vendor.mjs"
   },
   "dependencies": {
@@ -19,5 +21,10 @@
     "multer": "^2.0.1",
     "onnxruntime-web": "^1.29.0",
     "sherpa-onnx-node": "^1.13.6"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.0"
   }
 }

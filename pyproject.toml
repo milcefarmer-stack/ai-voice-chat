@@ -1,0 +1,41 @@
+[project]
+name = "voice-chat"
+version = "2.0.0"
+description = "AI 实时语音对话(pipecat 管线版):浏览器 VAD + WS 传输 + 可插拔 STT/LLM/TTS service"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "pipecat-ai[silero,websocket,openai,runner]>=1.3.0,<2",
+    "sherpa-onnx>=1.12.0",
+    "python-dotenv>=1.0",
+    "httpx>=0.27",
+    "python-multipart>=0.0.9",
+]
+
+[dependency-groups]
+dev = ["pytest>=8", "pytest-asyncio>=0.24", "ruff>=0.6"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/voice_chat"]
+
+[tool.uv]
+package = true
+# sherpa-onnx 1.13 的原生扩展按 onnxruntime C API 27 编译(动态依赖 onnxruntime.dll),
+# 而 pipecat 钉的是 ~=1.24.3(API 24)——运行时 GetApi(27) 会被拒并段错误。
+# 覆盖为 1.27(API 27),并配合 sherpa_engine 里的绝对路径预载,确保 sherpa 绑到正确版本。
+override-dependencies = ["onnxruntime==1.27.0"]
+
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
