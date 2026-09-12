@@ -21,6 +21,8 @@ Write-Host "✅ Node.js: $(node --version) / npm: $(npm --version)"
 
 # ---------- 2. 安装依赖（自动生成 public/vendor） ----------
 Write-Host "`n[1/5] 安装 npm 依赖（自动生成 VAD 本地资源）…"
+# 先停掉上次运行启动的服务，否则旧进程可能占用 public/vendor 下的 wasm 文件导致 postinstall 失败
+& (Join-Path $RepoDir "scripts\stop.ps1") | Out-Null
 npm install --no-audit --no-fund
 if ($LASTEXITCODE -ne 0) { Write-Host "❌ npm install 失败" -ForegroundColor Red; exit 1 }
 
@@ -28,9 +30,10 @@ if ($LASTEXITCODE -ne 0) { Write-Host "❌ npm install 失败" -ForegroundColor 
 Write-Host "`n[2/5] 检查 .env 配置…"
 if (-not (Test-Path ".env")) {
   Copy-Item ".env.example" ".env"
-  Write-Host "   已生成 .env，请编辑填入你的硅基流动 API Key："
-  Write-Host "   LLM_API_KEY=sk-你的key （硅基流动 https://cloud.siliconflow.cn 注册获取，TTS/ASR/LLM 通用）"
-  Write-Host "   ⚠️ 不填也能启动，但语音识别/合成/对话会报错"
+  Write-Host "   已生成 .env，请编辑填入 LLM 的 API Key（默认智谱 GLM 示例）："
+  Write-Host "   LLM_API_KEY=你的key （智谱 https://open.bigmodel.cn 获取；也可换硅基流动/DeepSeek/Ollama）"
+  Write-Host "   ✅ 语音识别/合成默认走本地 sherpa-onnx 离线引擎，不需要任何 Key"
+  Write-Host "   ⚠️ 不填 LLM Key 则打字/语音对话无法回答（语音识别本地仍可用）"
 } else {
   Write-Host "   .env 已存在，跳过。"
 }
@@ -38,8 +41,13 @@ if (-not (Test-Path ".env")) {
 # ---------- 4. Python 依赖（listen.py 录音用） ----------
 Write-Host "`n[3/5] 检查 Python 录音依赖…"
 if (Test-Cmd python) {
-  python -c "import sounddevice" 2>$null
-  if ($LASTEXITCODE -ne 0) {
+  # PS 5.1 下原生命令 stderr 会触发 $ErrorActionPreference='Stop' 中断脚本，改由 cmd 做重定向
+  $savedEap = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  cmd /c "python -c ""import sounddevice"" 2>nul"
+  $sdOk = ($LASTEXITCODE -eq 0)
+  $ErrorActionPreference = $savedEap
+  if (-not $sdOk) {
     Write-Host "   安装 sounddevice…"
     pip install sounddevice
   } else {
@@ -73,5 +81,5 @@ Write-Host "`n==============================================" -ForegroundColor G
 Write-Host "  安装完成！" -ForegroundColor Green
 Write-Host "  1. 浏览器打开 http://localhost:3000 体验语音对话" -ForegroundColor Green
 Write-Host "  2. 在 Claude Code 中说"读出来""语音问我"即可使用 voice-chat skill" -ForegroundColor Green
-Write-Host "  3. 若未填 API Key：编辑 $RepoDir\.env" -ForegroundColor Green
+Write-Host "  3. 若未填 LLM API Key：编辑 $RepoDir\.env" -ForegroundColor Green
 Write-Host "==============================================" -ForegroundColor Green

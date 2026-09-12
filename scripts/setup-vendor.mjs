@@ -10,6 +10,22 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const vadDst = join(root, 'public', 'vendor', 'vad');
 const ortDst = join(root, 'public', 'vendor', 'ort');
 
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// Windows 下目标文件可能被正在运行的服务或杀毒扫描短暂锁定（errno 32），重试几次
+async function copyWithRetry(src, dst, tries = 5) {
+  for (let i = 1; ; i++) {
+    try {
+      cpSync(src, dst);
+      return;
+    } catch (err) {
+      if (i >= tries) throw err;
+      console.warn(`[setup-vendor] ${dst} 被占用，${i}/${tries} 次重试后继续…`);
+      await sleep(500 * i);
+    }
+  }
+}
+
 function findFile(base, candidates) {
   for (const c of candidates) {
     const p = join(base, c);
@@ -30,12 +46,12 @@ if (existsSync(vadSrc)) {
   ];
   for (const [srcName, dstName] of items) {
     const s = join(vadSrc, srcName);
-    if (existsSync(s)) cpSync(s, join(vadDst, dstName));
+    if (existsSync(s)) await copyWithRetry(s, join(vadDst, dstName));
   }
   // silero onnx 模型（不同版本可能在 dist 根或 dist/models 下）
   for (const name of ['silero_vad_v5.onnx', 'silero_vad_legacy.onnx']) {
     const s = findFile(vadSrc, [name, join('models', name)]);
-    if (s) cpSync(s, join(vadDst, name));
+    if (s) await copyWithRetry(s, join(vadDst, name));
     else ok = false;
   }
 } else {
@@ -46,9 +62,9 @@ if (existsSync(vadSrc)) {
 const ortSrc = join(root, 'node_modules', 'onnxruntime-web', 'dist');
 if (existsSync(ortSrc)) {
   mkdirSync(ortDst, { recursive: true });
-  cpSync(join(ortSrc, 'ort.min.js'), join(ortDst, 'ort.min.js'));
+  await copyWithRetry(join(ortSrc, 'ort.min.js'), join(ortDst, 'ort.min.js'));
   for (const f of readdirSync(ortSrc)) {
-    if (f.startsWith('ort-wasm-simd-threaded')) cpSync(join(ortSrc, f), join(ortDst, f));
+    if (f.startsWith('ort-wasm-simd-threaded')) await copyWithRetry(join(ortSrc, f), join(ortDst, f));
   }
 } else {
   ok = false;

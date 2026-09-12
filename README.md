@@ -8,9 +8,9 @@
    ▼
 本地后端 /api/asr ──► sherpa-onnx SenseVoice 本地识别成文字（离线，~0.3s）
    ▼
-本地后端 /api/chat/stream ──► 硅基流动 LLM（流式 SSE，逐字返回）
+本地后端 /api/chat/stream ──► LLM（OpenAI 兼容接口，流式 SSE，逐字返回；默认智谱 glm-5.2）
    ▼
-首句逗号加速 → /api/tts ──► sherpa-onnx vits-melo 本地合成（流式 PCM，首块 ~0.2s）
+首句逗号加速 → /api/tts ──► sherpa-onnx matcha-zh-baker 本地合成（流式 PCM，首块 ~0.2s）
    │
    └─ 你随时开口 → 立即打断 AI（停语音 + 中止流式请求，合成同步终止）
 ```
@@ -24,7 +24,7 @@
 | **可打断（只说别吵）** | 你开口的瞬间，AI **立即停止语音播报**，同时服务端立刻终止合成（省 CPU）；思考/生成继续（气泡里写完）；你的新语音自动排队，等当前轮思考完再处理 |
 | **流式回答** | LLM 走 SSE 流式输出，文字逐字显示 |
 | **边说边答** | 回答按句子切分，第一句出来就开始合成语音，不用等全文；**首句逗号加速**——第一句不等句末标点，遇逗号立即开口 |
-| **自然语音** | 本地 vits-melo 中英女声（和 Open-LLM-VTuber 同款模型）；云端 CosyVoice2 作为回退 |
+| **自然语音** | 本地 matcha-zh-baker 中文女声（baker 普通话音色）；vits-melo 音色可选；云端 CosyVoice2 作为回退 |
 | **历史对话** | 自动保存每次会话（服务端 JSON 持久化，无需数据库）；「📚 历史」可回看、加载、删除；刷新页面自动恢复上次对话 |
 | **低延迟** | 本地 ASR ~0.3s + LLM SSE 流式 + 首句逗号加速 + TTS 首块 ~0.2s，多段流水线重叠 |
 | **无 CDN 依赖** | VAD 的 ONNX 模型 + onnxruntime WASM 全部本地化到 `public/vendor/` |
@@ -45,7 +45,7 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 npm install
 ```
 
-### 2. 配置 `.env`（硅基流动示例，一个 Key 全搞定）
+### 2. 配置 `.env`（默认智谱 GLM 示例）
 
 ```bash
 Copy-Item .env.example .env   # Windows PowerShell
@@ -53,21 +53,21 @@ Copy-Item .env.example .env   # Windows PowerShell
 ```
 
 ```ini
-LLM_API_KEY=sk-你的硅基流动key
-LLM_BASE_URL=https://api.siliconflow.cn/v1
-LLM_MODEL=deepseek-ai/DeepSeek-V3        # ⚠️ 必须用非 thinking 模型！
+LLM_API_KEY=你的智谱key                  # https://open.bigmodel.cn 获取
+LLM_BASE_URL=https://open.bigmodel.cn/api/paas/v4
+LLM_MODEL=glm-5.2                        # ⚠️ 必须用非 thinking 模型！
 
-ASR_MODEL=XingChenAGI/XingChenASR-V3.2-Ultra
-
-TTS_MODEL=FunAudioLLM/CosyVoice2-0.5B
-TTS_VOICE=FunAudioLLM/CosyVoice2-0.5B:bella   # 可选 alex / bella / anna / david
+# 语音默认走本地 sherpa-onnx 离线引擎（见下文），零额度零延迟；
+# 云端 ASR/TTS 仅作为本地模型缺失时的回退，回退目标默认硅基流动：
+# ASR_BASE_URL=https://api.siliconflow.cn/v1
+# TTS_BASE_URL=https://api.siliconflow.cn/v1
 ```
 
 > ⚠️ **模型选择（速度关键）**：语音对话必须用**非 thinking** 模型。
-> - `deepseek-ai/DeepSeek-V3`（推荐，无思维链，已实测）
-> - ❌ `deepseek-ai/DeepSeek-R1-*`、`Qwen/Qwen3-*`（R1 和 Qwen3 在硅基流动上默认输出思维链，回答前先"想"一大段，非常慢）
+> - ❌ `deepseek-ai/DeepSeek-R1-*`、`Qwen/Qwen3-*` 等推理模型（回答前先跑思维链，非常慢）
+> - ⚠️ **LLM 用智谱等非硅基流动服务时**，云端回退用的 ASR/TTS 是硅基流动的模型，需在 `.env` 单独配 `ASR_API_KEY` / `TTS_API_KEY`（硅基流动 Key），否则云端回退不可用
 
-其他 LLM 源：本地 Ollama（`LLM_API_KEY` 留空，自动连 `http://localhost:11434`）、DeepSeek 官方、OpenAI 等 OpenAI 兼容服务均可，改 `LLM_BASE_URL` / `LLM_MODEL` 即可。
+其他 LLM 源：本地 Ollama（`LLM_API_KEY` 留空，自动连 `http://localhost:11434`）、硅基流动、DeepSeek 官方、OpenAI 等 OpenAI 兼容服务均可，改 `LLM_BASE_URL` / `LLM_MODEL` 即可。
 
 ### 3. 启动 / 停止（服务管理）
 
@@ -106,15 +106,22 @@ npm run dev     # 前台调试模式（带日志输出，Ctrl+C 退出）
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `LLM_API_KEY` | - | LLM / ASR / TTS 通用 Key（硅基流动） |
-| `LLM_BASE_URL` | `http://localhost:11434/v1` | LLM 地址（无 Key 时自动走 Ollama） |
-| `LLM_MODEL` | `qwen2.5:7b` | ⚠️ 语音场景用非 thinking 模型 |
-| `LLM_MAX_TOKENS` | `200` | 回答长度上限 |
-| `ASR_MODEL` | `XingChenAGI/XingChenASR-V3.2-Ultra` | 语音识别模型 |
-| `TTS_MODEL` | `FunAudioLLM/CosyVoice2-0.5B` | 语音合成模型（专业 TTS，短句正常） |
-| `TTS_VOICE` | `FunAudioLLM/CosyVoice2-0.5B:bella` | 音色（可选 alex / bella / anna / david） |
+| `LLM_API_KEY` | - | LLM Key（默认示例为智谱；留空自动尝试本地 Ollama） |
+| `LLM_BASE_URL` | `https://open.bigmodel.cn/api/paas/v4` | LLM 地址（任意 OpenAI 兼容服务） |
+| `LLM_MODEL` | `glm-5.2` | ⚠️ 语音场景用非 thinking 模型 |
+| `LLM_MAX_TOKENS` | `1000` | 回答长度上限 |
+| `ASR_MODEL` | `XingChenAGI/XingChenASR-V3.2` | 云端语音识别模型（仅回退时使用） |
+| `ASR_API_KEY` / `ASR_BASE_URL` | 取 `LLM_API_KEY` / `LLM_BASE_URL` | 云端 ASR 的 Key/地址；LLM 非硅基流动时需单独指定（硅基流动） |
+| `TTS_MODEL` | `FunAudioLLM/CosyVoice2-0.5B` | 云端语音合成模型（专业 TTS，短句正常） |
+| `TTS_VOICE` | `FunAudioLLM/CosyVoice2-0.5B:bella` | 云端音色（可选 alex / bella / anna / david） |
+| `TTS_API_KEY` / `TTS_BASE_URL` | 取 `LLM_API_KEY` / `LLM_BASE_URL` | 云端 TTS 的 Key/地址；LLM 非硅基流动时需单独指定（硅基流动） |
 | `TTS_SPEED` | `1.0` | 默认语速（0.25~4.0）；页面上的语速选择器可随时覆盖 |
+| `ASR_PROVIDER` / `TTS_PROVIDER` | `local` | `auto`（本地优先失败回退云端）/ `local` / `cloud` |
+| `SHERPA_TTS_MODEL_TYPE` | `matcha` | `matcha`（baker 音色）/ `vits`（melo 音色） |
+| `SHERPA_TTS_GAIN` | `1.0` | 本地 TTS 音量增益（matcha 天生偏响，可设 0.4 压到 melo 水平） |
 | `PORT` | `3000` | 服务端口 |
+
+其余 sherpa 细节参数（模型目录/线程数/按句合成等）见 [.env.example](.env.example) 注释。
 
 ## 给 Claude Code / agent 用（voice-chat skill）
 
@@ -122,7 +129,7 @@ npm run dev     # 前台调试模式（带日志输出，Ctrl+C 退出）
 
 在 Claude Code 里直接说：
 
-- **"把这段话读出来"** → agent 运行 `speak.ps1`，用 CosyVoice2 自然中文音色朗读
+- **"把这段话读出来"** → agent 运行 `speak.ps1`，用本地 baker 音色自然朗读中文
 - **"用语音问我一个问题，等我说完再继续"** → `speak.ps1` 提问 → `listen.py` 录音识别 → 拿到你的口头回答继续干活
 - **"语音回复我"** → 完成工作后播报结果
 
@@ -159,21 +166,21 @@ ASR/TTS 默认走本地离线引擎（与 Open-LLM-VTuber 同款模型，存放�
 | ASR | SenseVoiceSmall int8（中英日韩粤） | `models/asr/sense-voice/` | 8s 音频识别 ~0.26s |
 | TTS | matcha-icefall-zh-baker（中文女声，48kHz→22.05kHz 输出） | `models/tts/matcha-zh-baker/matcha-icefall-zh-baker/` + `vocos-22khz-univ.onnx` | 首块 ~0.08s，RTF 0.077 |
 
-> 默认 TTS 为 **matcha**（最快、自然）；`SHERPA_TTS_MODEL_TYPE=matcha` 可切回 `vits`（melo）。注意 **baker 数据集仅限非商用**。
+> 默认 TTS 为 **matcha**（最快、自然，baker 音色）；`SHERPA_TTS_MODEL_TYPE=vits` 可切换 melo 音色（模型放 `models/tts/vits-melo-tts-zh_en/`）。注意 **baker 数据集仅限非商用**。
 
 - 模型来源：[sherpa-onnx asr-models](https://github.com/k2-fsa/sherpa-onnx/releases/tag/asr-models) / [tts-models](https://github.com/k2-fsa/sherpa-onnx/releases/tag/tts-models)，目录可在 `.env` 里改；
 - `ASR_PROVIDER` / `TTS_PROVIDER`：`auto`（默认，本地优先失败回退云端）/ `local` / `cloud`；
 - ⚠️ 服务必须用**真正的 Node**（≥20）运行：Electron 内置 Node 无法加载原生引擎，`npm start` 会自动挑选正确的 node；
 - 优化思路与实测数据详见 [docs/voice-latency-optimization.md](docs/voice-latency-optimization.md)。
 
-**Q: 识别出错（network / service-not-allowed）？**
-那是浏览器自带识别（Chrome 走 Google，国内不可用）。本项目默认走**录音上传识别**（硅基流动 XingChenASR），国内稳定。若仍报错，确认 `.env` 里 `LLM_API_KEY` 已配置。
+**Q: 识别出错？**
+识别默认走**本地 sherpa-onnx SenseVoice**（离线、国内无障碍）。若本地模型缺失回退云端（硅基流动 XingChenASR），需确认 `.env` 里 Key 已配置（LLM 非硅基流动时要配 `ASR_API_KEY`）。
 
 **Q: VAD 没反应？**
 确认浏览器允许了麦克风权限；检查顶部"聆听中"指示灯是否亮着（绿点闪烁）。若被暂停，点「▶ 开始聆听」。
 
 **Q: 换 TTS 音色？**
-把 `TTS_VOICE` 换成 `FunAudioLLM/CosyVoice2-0.5B:{alex|bella|anna|david}` 之一即可（当前默认 bella）。换模型（如 MOSS-TTSD）时注意：MOSS 是对话模型，对短句（如"好的"）会合成出乱码，不推荐用于流式对话。
+本地默认 **matcha-zh-baker**（baker 普通话女声）；想换 melo 音色，把 `.env` 的 `SHERPA_TTS_MODEL_TYPE` 改 `vits`、`SHERPA_TTS_MODEL_DIR` 改 `models/tts/vits-melo-tts-zh_en`、`SHERPA_TTS_MODEL_FILE` 改 `model.onnx`，并注释掉 `SHERPA_TTS_VOCODER` 和 `SHERPA_TTS_GAIN` 两行。云端回退音色用 `TTS_VOICE=FunAudioLLM/CosyVoice2-0.5B:{alex|bella|anna|david}`。换模型（如 MOSS-TTSD）时注意：MOSS 是对话模型，对短句（如"好的"）会合成出乱码，不推荐用于流式对话。
 
 **Q: 怎么调语速？**
 页面上「语速」下拉框直接调（0.6 慢 ~ 1.5 快），即时生效并记住选择；也可以改 `.env` 的 `TTS_SPEED`（0.25~4.0）设默认值。语速通过重新合成实现，无音调失真。
@@ -187,12 +194,14 @@ ASR/TTS/VAD 已经全部离线（sherpa-onnx + Silero）。只剩 LLM：把 `.en
 ai-voice-chat/
 ├── server/
 │   ├── server.js           # Express：流式 LLM / ASR / TTS / 历史会话 / 静态文件
-│   ├── sherpa.js           # sherpa-onnx 本地语音引擎（SenseVoice ASR + vits-melo TTS）
+│   ├── sherpa.js           # sherpa-onnx 本地语音引擎（SenseVoice ASR + matcha/vits TTS）
 │   └── history.js          # 历史会话存储（JSON 文件持久化，无需数据库）
 ├── data/                   # 历史会话数据（data/history.json，gitignore）
-├── models/                 # 本地语音大模型（~410MB，gitignore）
-│   ├── asr/sense-voice/    # SenseVoice int8 + tokens
-│   └── tts/vits-melo-zh-en/ # vits-melo + lexicon + jieba dict + 规则 FST
+├── models/                 # 本地语音大模型（gitignore）
+│   ├── asr/sense-voice/    # SenseVoice int8 + tokens（~240MB）
+│   └── tts/
+│       ├── matcha-zh-baker/      # matcha 声学模型 + vocos 声码器（默认音色，~130MB）
+│       └── vits-melo-tts-zh_en/  # vits-melo + lexicon + jieba dict + 规则 FST（可选音色，~300MB）
 ├── public/
 │   ├── index.html          # 页面（自动聆听模式）
 │   ├── app.js              # VAD 自动对话 + 流式展示 + 首句逗号加速 + 句级 TTS + 打断
